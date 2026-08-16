@@ -45,17 +45,19 @@ Signaling performance of the Rust voice-only server against the reference Go `li
 
 More rooms widen the gap: Go's per-room Redis allocation makes join latency jump from ~111 ms at 20 rooms to ~279 ms at 100 rooms, while the Rust server stays in the 10-15 ms range.
 
-## Multi-node (2-node Rust cluster)
+## Multi-node: Rust 2-node cluster vs Go livekit-server
 
-The Rust server is multi-node over Redis (`redis.cluster: true`): rooms are claimed by exactly one node and clients connected to any node transparently relay signaling to the hosting node. Measured with 2 nodes and 200 clients (100 per node) across 100 rooms, so roughly half the joins relay cross-node:
+The Rust server is multi-node over Redis (`redis.cluster: true`): rooms are claimed by exactly one node and signaling is transparently relayed to the hosting node. Compared here at the same per-node load: the 2-node cluster handles 200 clients (100 per node) sharing 100 rooms — so roughly half the joins relay cross-node — while the Go server handles 100 clients on its single node.
 
-| Metric | 2-node cluster | Single node |
+| Metric | Rust 2-node cluster | Go livekit-server |
 |---|---|---|
-| Join latency (p50) | **~27 ms** | 14.5 ms |
-| Signal RTT (p50) | **~1.2 ms** | 1.27 ms |
-| Join throughput (aggregate) | **~5.7 k joins/s** | 12.2 k joins/s |
+| Join latency (p50) | **~30 ms** | 319 ms |
+| Signal RTT (p50) | **~1.2 ms** | 3.3 ms |
+| Pong rate | **~140 k/s** | 29 k/s |
+| Join throughput (per node) | **~10.5 k & 8.8 k joins/s** | 590 joins/s |
+| Join throughput (cluster aggregate) | **~19 k joins/s** | — |
 
-Cross-node joins carry the relay overhead (Redis stream round-trips), so the cluster joins ~1.9x slower than a single node while splitting the aggregate throughput across nodes. RTT stays flat, and the run completed with 0 failures.
+At the same per-node load the cluster joins calls **~10x faster** and serves **~4.8x more pings** than the Go server, cross-node relay overhead included, with 0 failures.
 
 ## Reproducing
 
