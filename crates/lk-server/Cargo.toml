@@ -1,0 +1,56 @@
+[package]
+name = "lk-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Drop-in LiveKit-compatible voice-only SFU server"
+
+[[bin]]
+name = "livekit-voice"
+path = "src/main.rs"
+
+[dependencies]
+lk-proto = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+jsonwebtoken = { workspace = true }
+webrtc = { workspace = true }
+
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+url = { workspace = true }
+
+redis = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+thiserror = { workspace = true }
+tokio-util = { workspace = true }
+flate2 = { workspace = true }
+
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+tokio-tungstenite = "0.26"
+
+[dev-dependencies]
+tokio = { workspace = true }
+http = "1"
+criterion = { workspace = true }
+
+[[bench]]
+name = "core"
+harness = false

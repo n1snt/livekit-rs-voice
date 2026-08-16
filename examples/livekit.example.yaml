@@ -1,0 +1,46 @@
+# Example configuration for livekit-rs-voice.
+# This is standard LiveKit YAML; the reference livekit-server configs load as-is.
+
+# HTTP/WebSocket signaling port (also serves the Twirp HTTP API).
+port: 7880
+
+# One or more API key: secret pairs used to verify HS256 access tokens.
+keys:
+  your-livekit-key: your-livekit-secret
+
+logging:
+  level: info
+
+rtc:
+  # Media uses a single UDP port when only `tcp_port` is set...
+  tcp_port: 7881
+  # ...or a UDP range when both bounds are configured.
+  # port_range_start: 50000
+  # port_range_end: 60000
+  # Host candidates to advertise (e.g. public + private NICs).
+  # use_external_ip: false
+  # ips:
+  #   includes:
+  #     - 203.0.113.10/32
+  #     - 192.0.2.10/32
+
+room:
+  # Keep an unjoined room open for this many seconds before closing it.
+  empty_timeout: 300
+  # Keep an empty room open this many seconds after the last participant leaves.
+  departure_timeout: 20
+
+# Optional: Redis store so the livekit/sip and livekit/egress containers can
+# share SIP trunks, dispatch rules and egress state. Omit to run standalone.
+# redis:
+#   address: 127.0.0.1:6379
+
+# Webhooks are POSTed to these URLs, signed with
+# `X-Livekit-Signature: hex(HMAC-SHA256(webhook.api_key, body))`.
+# webhook:
+#   api_key: your-livekit-key
+#   urls:
+#     - https://example.com/livekit/webhook
+
+# Prometheus metrics on a dedicated port (kept off the main port).
+# prometheus_port: 6789

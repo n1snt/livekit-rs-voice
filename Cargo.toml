@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lk-proto",
+    "crates/lk-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+lk-proto = { path = "crates/lk-proto" }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+# --- protocol serialization ---
+prost = "0.13"
+prost-build = "0.13"
+protox = "0.8"
+pbjson = "0.9"
+pbjson-build = "0.9"
+bytes = "1"
+
+# --- async runtime / http / ws ---
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+
+# --- serde ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# --- auth ---
+jsonwebtoken = "9"
+
+# --- webrtc media plane ---
+webrtc = "0.12"
+
+# --- crypto / misc ---
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+url = "2"
+
+# --- redis ---
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# --- logging ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- utilities ---
+thiserror = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+flate2 = "1"

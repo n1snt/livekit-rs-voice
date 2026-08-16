@@ -1,0 +1,8 @@
+target
+.git
+.gitignore
+.github
+docs
+examples
+scripts
+*.md

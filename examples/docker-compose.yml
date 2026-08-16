@@ -1,0 +1,24 @@
+# Run the server in a container.
+#
+#   docker compose up -d
+#
+# Replace `your-livekit-key` / `your-livekit-secret` in livekit.example.yaml
+# before exposing the server publicly.
+services:
+  livekit-voice:
+    image: ghcr.io/n1snt/livekit-rs-voice:latest
+    restart: unless-stopped
+    ports:
+      - "7880:7880/tcp"        # HTTP/WS signaling + Twirp API
+      - "7881:7881/udp"        # media (UDP)
+      - "7881:7881/tcp"        # media (TCP fallback)
+      - "7882:7882/tcp"        # optional second TCP port
+    volumes:
+      - ./livekit.example.yaml:/etc/livekit/livekit.yaml:ro
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    # Optional: Redis-backed store shared with livekit/sip + livekit/egress.
+    # depends_on:
+    #   - redis
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped

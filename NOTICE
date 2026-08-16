@@ -1,0 +1,28 @@
+livekit-rs-voice
+Copyright (c) 2026 the livekit-rs-voice contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+--------------------------------------------------------------------------
+
+This product is a clean-room style reimplementation that is wire-compatible
+with the LiveKit protocol and includes material derived from other projects:
+
+- The `.proto` files under `protos/` are Copyright (c) LiveKit, Inc., licensed
+  under the Apache License 2.0, from https://github.com/livekit/protocol.
+- The WebRTC media stack is built on `webrtc-rs`
+  (https://github.com/webrtc-rs/webrtc), MIT licensed.
+
+"LiveKit" is a trademark of LiveKit, Inc. This project is not affiliated with
+or endorsed by LiveKit, Inc. "LiveKit-compatible" refers to wire-protocol
+compatibility only.
