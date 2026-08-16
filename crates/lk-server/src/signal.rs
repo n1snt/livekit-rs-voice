@@ -673,7 +673,10 @@ pub async fn run_signal_session(
     // Hand the outbound channel to the participant.
     let _old = participant.set_signal_sink(tx);
     if let Some(ctx) = room.context() {
-        ctx.metrics.connections.inc();
+        ctx.metrics
+            .connection_total
+            .with_label_values(&["incoming"])
+            .inc();
     }
 
     // Writer task: the join response is written first (so it is always the
@@ -778,7 +781,10 @@ pub async fn run_signal_session(
         end_participant(&participant, lk::DisconnectReason::SignalClose).await;
     }
     if let Some(ctx) = room.context() {
-        ctx.metrics.connections.dec();
+        ctx.metrics
+            .connection_total
+            .with_label_values(&["incoming"])
+            .dec();
     }
     let _ = sink_task.await;
 }
@@ -925,7 +931,7 @@ pub async fn join_room(
         ctx.metrics.participant_total.inc();
         ctx.metrics
             .participant_join
-            .with_label_values(&["signal_connected"])
+            .with_label_values(&["signal_connected", ""])
             .inc();
     }
 

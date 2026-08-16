@@ -170,6 +170,14 @@ pub struct Forwarder {
     /// Per-track RTP statistics used to derive connection quality.
     pub stats: Mutex<RtpStats>,
     pub metrics: Arc<crate::metrics::Metrics>,
+    /// Track source string for the `source` metric label.
+    pub track_source: String,
+    /// Latest publisher SenderReport (rtp_time, NTP wall-clock in unix ns),
+    /// used to derive per-packet forwarding latency.
+    pub sender_report: Mutex<Option<(u32, i64)>>,
+    /// Running forwarding-jitter estimate (RFC 3550) over the latency series.
+    pub forward_jitter: std::sync::Mutex<f64>,
+    pub last_forward_latency: std::sync::Mutex<Option<f64>>,
 }
 
 /// Running RTP loss + jitter estimates for a published track. Loss is derived
@@ -179,29 +187,46 @@ pub struct RtpStats {
     pub packets: u64,
     pub expected: u64,
     pub lost: u64,
+    pub out_of_order: u64,
     pub jitter_ts: f64,
-    last_seq: Option<u16>,
+    max_seq: Option<u16>,
     last_rtp_ts: Option<u32>,
     last_arrival_ms: Option<i64>,
 }
 
 impl RtpStats {
     /// Feeds one RTP packet into the estimator (RFC 3550 interarrival jitter,
-    /// loss from sequence gaps).
+    /// loss + out-of-order from sequence tracking against the high-water
+    /// mark).
     fn observe(&mut self, seq: u16, rtp_ts: u32, arrival_ms: i64) {
         self.packets += 1;
-        if let Some(prev) = self.last_seq {
-            let gap = seq.wrapping_sub(prev);
-            if gap > 0 && gap < 32768 {
-                self.expected += gap as u64;
-                self.lost += (gap - 1) as u64;
-            } else {
-                self.expected += 1;
+        match self.max_seq {
+            None => {
+                self.max_seq = Some(seq);
+                self.expected = 1;
             }
-        } else {
-            self.expected = 1;
+            Some(max) => {
+                let behind = max.wrapping_sub(seq);
+                if behind > 0 && behind < 32768 {
+                    // Behind the high-water mark: reordered. Fills one
+                    // previously-missing slot, so it is not counted as loss.
+                    self.out_of_order += 1;
+                    self.expected += 1;
+                    if self.lost > 0 {
+                        self.lost -= 1;
+                    }
+                } else {
+                    let gap = seq.wrapping_sub(max);
+                    if gap > 0 && gap < 32768 {
+                        self.expected += gap as u64;
+                        self.lost += (gap - 1) as u64;
+                        self.max_seq = Some(seq);
+                    } else {
+                        self.expected += 1; // duplicate
+                    }
+                }
+            }
         }
-        self.last_seq = Some(seq);
         if let (Some(prev_ts), Some(prev_arr)) = (self.last_rtp_ts, self.last_arrival_ms) {
             // Opus runs at 48 kHz; expected inter-arrival delta = elapsed ms * 48.
             let d = (rtp_ts.wrapping_sub(prev_ts) as i64) - (arrival_ms - prev_arr) * 48;
@@ -209,6 +234,29 @@ impl RtpStats {
         }
         self.last_rtp_ts = Some(rtp_ts);
         self.last_arrival_ms = Some(arrival_ms);
+    }
+
+    /// Loss percentage since tracking began.
+    fn loss_percent(&self) -> f64 {
+        if self.expected > 0 {
+            self.lost as f64 / self.expected as f64 * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Out-of-order percentage since tracking began.
+    fn out_of_order_percent(&self) -> f64 {
+        if self.expected > 0 {
+            self.out_of_order as f64 / self.expected as f64 * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Interarrival jitter in microseconds (48 kHz clock).
+    fn jitter_us(&self) -> f64 {
+        self.jitter_ts / 48.0 * 1_000_000.0
     }
 }
 
@@ -233,23 +281,59 @@ impl Forwarder {
         self.stats.lock().unwrap().observe(seq, rtp_ts, arrival_ms);
     }
 
-    /// Records the current loss/jitter into the quality histograms. Called
-    /// periodically from the forwarding loop.
+    /// Records the current loss/jitter into the quality and per-stream
+    /// histograms. Called periodically from the forwarding loop.
     fn record_quality(&self) {
-        let (loss_pct, jitter_ms) = {
+        let (loss_pct, ooo_pct, jitter_us) = {
             let st = self.stats.lock().unwrap();
-            let loss_pct = if st.expected > 0 {
-                st.lost as f64 / st.expected as f64 * 100.0
-            } else {
-                0.0
-            };
-            (loss_pct, st.jitter_ts / 48.0)
+            (st.loss_percent(), st.out_of_order_percent(), st.jitter_us())
         };
-        let score = quality_score(loss_pct, jitter_ms);
+        let score = quality_score(loss_pct, jitter_us / 1000.0);
         self.metrics.quality_score.observe(score);
         self.metrics
             .quality_rating
             .observe(quality_rating(score) as f64);
+
+        let labels = &["incoming", self.track_source.as_str(), "audio", ""];
+        if loss_pct > 0.0 {
+            self.metrics
+                .packet_loss_percent
+                .with_label_values(labels)
+                .observe(loss_pct);
+        }
+        if ooo_pct > 0.0 {
+            self.metrics
+                .packet_out_of_order_percent
+                .with_label_values(labels)
+                .observe(ooo_pct);
+        }
+        if jitter_us > 0.0 {
+            self.metrics
+                .jitter_us
+                .with_label_values(labels)
+                .observe(jitter_us);
+        }
+    }
+
+    /// Updates the publisher SenderReport mapping used for forward latency.
+    fn set_sender_report(&self, rtp_time: u32, ntp_unix_ns: i64) {
+        *self.sender_report.lock().unwrap() = Some((rtp_time, ntp_unix_ns));
+    }
+
+    /// Records the forwarding latency (ns) for one packet: updates the
+    /// per-sample histogram, the long-term gauges, and the jitter estimate.
+    fn observe_forward_latency(&self, latency_ns: f64) {
+        self.metrics.forward_latency_ns.observe(latency_ns.max(0.0));
+        let mut jitter = self.forward_jitter.lock().unwrap();
+        let mut last = self.last_forward_latency.lock().unwrap();
+        if let Some(prev) = *last {
+            let d = (latency_ns - prev).abs();
+            *jitter += (d - *jitter) / 16.0;
+        }
+        *last = Some(latency_ns);
+        let j = *jitter;
+        self.metrics.forward_latency.set(latency_ns.max(0.0));
+        self.metrics.forward_jitter.set(j);
     }
 }
 
@@ -271,6 +355,107 @@ fn quality_rating(score: f64) -> i32 {
     } else {
         3
     }
+}
+
+/// Converts an RTCP NTP timestamp (1900 epoch, 64-bit fixed point) to unix ns.
+fn ntp_to_unix_ns(ntp: u64) -> i64 {
+    let seconds = (ntp >> 32) as i64;
+    let fraction = (ntp & 0xffff_ffff) as i64;
+    let unix_secs = seconds - 2_208_988_800; // NTP 1900 -> unix 1970
+    unix_secs * 1_000_000_000 + fraction * 1_000_000_000 / (1 << 32)
+}
+
+/// Round-trip time (ms) from an RTCP receiver report's LSR + DLSR fields.
+fn rtt_ms_from_report(lsr: u32, dlsr: u32) -> f64 {
+    let now_sec32 = (crate::core::unix_seconds() + 2_208_988_800) & 0xffff_ffff;
+    let secs = (now_sec32 - lsr as i64) as f64 - dlsr as f64 / 65536.0;
+    (secs * 1000.0).max(0.0)
+}
+
+/// Reads RTCP from the publisher's receiver: SenderReports feed the forward
+/// latency mapping.
+fn spawn_publisher_rtcp_reader(
+    receiver: Arc<webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver>,
+    forwarder: Arc<Forwarder>,
+) {
+    tokio::spawn(async move {
+        while let Ok((packets, _)) = receiver.read_rtcp().await {
+            for p in packets {
+                let Some(sr) = p
+                    .as_any()
+                    .downcast_ref::<webrtc::rtcp::sender_report::SenderReport>()
+                else {
+                    continue;
+                };
+                forwarder.set_sender_report(sr.rtp_time, ntp_to_unix_ns(sr.ntp_time));
+            }
+        }
+    });
+}
+
+/// Reads RTCP feedback (NACK/PLI/FIR) and receiver reports from a subscriber:
+/// feeds the outgoing-direction RTCP and stream metrics.
+fn spawn_subscriber_rtcp_reader(
+    sender: Arc<webrtc::rtp_transceiver::rtp_sender::RTCRtpSender>,
+    metrics: Arc<crate::metrics::Metrics>,
+    source: &str,
+) {
+    let source = source.to_string();
+    tokio::spawn(async move {
+        while let Ok((packets, _)) = sender.read_rtcp().await {
+            for p in packets {
+                let any = p.as_any();
+                if let Some(nack) = any.downcast_ref::<
+                    webrtc::rtcp::transport_feedbacks::transport_layer_nack::TransportLayerNack,
+                >() {
+                    metrics
+                        .nack_total
+                        .with_label_values(&["outgoing", ""])
+                        .inc_by(nack.nacks.len() as u64);
+                } else if any
+                    .downcast_ref::<
+                        webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
+                    >()
+                    .is_some()
+                {
+                    metrics
+                        .pli_total
+                        .with_label_values(&["outgoing", ""])
+                        .inc();
+                } else if any
+                    .downcast_ref::<
+                        webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest,
+                    >()
+                    .is_some()
+                {
+                    metrics
+                        .fir_total
+                        .with_label_values(&["outgoing", ""])
+                        .inc();
+                } else if let Some(rr) = any
+                    .downcast_ref::<webrtc::rtcp::receiver_report::ReceiverReport>()
+                {
+                    for rep in &rr.reports {
+                        let labels = &["outgoing", source.as_str(), "audio", ""];
+                        metrics
+                            .packet_loss_percent
+                            .with_label_values(labels)
+                            .observe(rep.fraction_lost as f64 / 256.0 * 100.0);
+                        metrics
+                            .jitter_us
+                            .with_label_values(labels)
+                            .observe(rep.jitter as f64 * 1_000_000.0 / 48000.0);
+                        if rep.last_sender_report != 0 {
+                            metrics
+                                .rtt_ms
+                                .with_label_values(labels)
+                                .observe(rtt_ms_from_report(rep.last_sender_report, rep.delay));
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Returns the RTCIceServers advertised to clients (currently none; TURN is
@@ -513,7 +698,7 @@ pub async fn ensure_publisher(
             }));
         })
     }));
-    pc.on_track(Box::new(move |track_remote: Arc<TrackRemote>, _receiver: Arc<webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver>, transceiver: Arc<RTCRtpTransceiver>| {
+    pc.on_track(Box::new(move |track_remote: Arc<TrackRemote>, receiver: Arc<webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver>, transceiver: Arc<RTCRtpTransceiver>| {
         let p = p2.clone();
         Box::pin(async move {
             let Some(p) = p.upgrade() else { return };
@@ -579,8 +764,13 @@ pub async fn ensure_publisher(
                 closed: AtomicBool::new(false),
                 stats: Mutex::new(RtpStats::default()),
                 metrics,
+                track_source: track.source.source_str().to_string(),
+                sender_report: Mutex::new(None),
+                forward_jitter: std::sync::Mutex::new(0.0),
+                last_forward_latency: std::sync::Mutex::new(None),
             });
             p.media.lock().unwrap().forwarders.insert(track.sid.clone(), forwarder.clone());
+            spawn_publisher_rtcp_reader(receiver, forwarder.clone());
 
             crate::signal::on_track_published(&p, &track).await;
 
@@ -616,6 +806,14 @@ pub async fn ensure_publisher(
                         pkt.header.timestamp,
                         crate::core::unix_millis(),
                     );
+                    // Forwarding latency: how long ago the publisher sent this
+                    // packet, from the latest SenderReport RTP<->NTP mapping.
+                    if let Some((sr_rtp, sr_ntp_ns)) = *fwd.sender_report.lock().unwrap() {
+                        let ts_delta_ns =
+                            (pkt.header.timestamp.wrapping_sub(sr_rtp) as f64) / 48000.0 * 1e9;
+                        let latency_ns = crate::core::unix_nanos() as f64 - (sr_ntp_ns as f64 + ts_delta_ns);
+                        fwd.observe_forward_latency(latency_ns);
+                    }
                     if fwd.stats.lock().unwrap().packets % 100 == 0 {
                         fwd.record_quality();
                     }
@@ -802,7 +1000,9 @@ pub async fn add_subscription(
         media
             .subscriber_tracks
             .insert(track.sid.clone(), track_local.clone());
-        media.subscriber_senders.insert(track.sid.clone(), sender);
+        media
+            .subscriber_senders
+            .insert(track.sid.clone(), sender.clone());
     }
     forwarder.add_subscriber(&subscriber.sid, track_local);
     if let Some(room) = subscriber.room() {
@@ -817,6 +1017,12 @@ pub async fn add_subscription(
                 .inc();
         }
     }
+    // Read RTCP feedback from this subscriber (NACK/PLI/FIR + RR) for metrics.
+    spawn_subscriber_rtcp_reader(
+        sender.clone(),
+        ctx.metrics.clone(),
+        track.source.source_str(),
+    );
     let _ = ctx;
 
     request_subscriber_negotiation(subscriber);
@@ -1102,5 +1308,34 @@ mod tests {
             st.observe(i as u16, (i * 48) as u32, late as i64);
         }
         assert!(st.jitter_ts > 1.0);
+    }
+
+    #[test]
+    fn rtp_stats_counts_out_of_order() {
+        let mut st = RtpStats::default();
+        for seq in [1u16, 2, 4, 5, 3] {
+            st.observe(seq, seq as u32, seq as i64);
+        }
+        // Packet 3 arrives after 4 and 5 -> one out-of-order.
+        assert_eq!(st.out_of_order, 1);
+        assert_eq!(st.lost, 0);
+        assert!(st.out_of_order_percent() > 0.0);
+    }
+
+    #[test]
+    fn ntp_conversion_lands_in_unix_epoch() {
+        // NTP 0 = 1900-01-01; unix 1970-01-01 = 2_208_988_800 NTP seconds.
+        let ntp = (2_208_988_800u64) << 32;
+        assert_eq!(ntp_to_unix_ns(ntp), 0);
+        let ntp = (2_208_988_800u64 + 1) << 32;
+        assert_eq!(ntp_to_unix_ns(ntp), 1_000_000_000);
+    }
+
+    #[test]
+    fn rtt_is_non_negative() {
+        // A report just received with a tiny DLSR.
+        let now_sec32 = (crate::core::unix_seconds() + 2_208_988_800) & 0xffff_ffff;
+        let rtt = rtt_ms_from_report((now_sec32 - 1) as u32, 655);
+        assert!(rtt > 0.0 && rtt < 2000.0);
     }
 }

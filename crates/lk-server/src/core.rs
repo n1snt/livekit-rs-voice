@@ -18,6 +18,13 @@ pub fn unix_micros() -> i64 {
         .unwrap_or(0)
 }
 
+pub fn unix_nanos() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
 pub fn unix_millis() -> i64 {
     unix_micros() / 1_000
 }

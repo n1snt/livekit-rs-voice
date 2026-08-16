@@ -72,7 +72,7 @@ pub struct Metrics {
     // participants / sessions
     pub participant_total: IntGauge,
     pub participant_join: IntCounterVec, // status
-    pub connections: IntGauge,
+    pub connection_total: IntGaugeVec,
     pub session_join_latency: HistogramVec, // protocol_version
     pub session_start_time: HistogramVec,   // protocol_version, warp
     pub session_duration: HistogramVec,     // protocol_version
@@ -85,8 +85,20 @@ pub struct Metrics {
     pub quality_rating: Histogram,
     pub quality_score: Histogram,
     // media
-    pub packet_total: IntCounterVec, // direction, transmission
-    pub packet_bytes: IntCounterVec, // direction, transmission
+    pub packet_total: IntCounterVec,       // direction, transmission
+    pub packet_bytes: IntCounterVec,       // direction, transmission
+    pub nack_total: IntCounterVec,         // direction, country
+    pub pli_total: IntCounterVec,          // direction, country
+    pub fir_total: IntCounterVec,          // direction, country
+    pub packet_loss_percent: HistogramVec, // direction, source, type, country
+    pub packet_loss_total: IntCounterVec,  // direction, source, type, country
+    pub packet_out_of_order_percent: HistogramVec, // direction, source, type, country
+    pub packet_out_of_order_total: IntCounterVec, // direction, source, type, country
+    pub jitter_us: HistogramVec,           // direction, source, type, country
+    pub rtt_ms: HistogramVec,              // direction, source, type, country
+    pub forward_latency: prometheus::Gauge,
+    pub forward_jitter: prometheus::Gauge,
+    pub forward_latency_ns: Histogram,
 }
 
 impl Metrics {
@@ -112,12 +124,13 @@ impl Metrics {
         let participant_join = counter_vec(
             "livekit_participant_join_total",
             "Total participants that connected to the signal channel.",
-            &["status"],
+            &["state", "warp"],
             nl.clone(),
         );
-        let connections = gauge(
-            "livekit_connections",
-            "Current number of signal connections.",
+        let connection_total = gauge_vec(
+            "livekit_connection_total",
+            "Current number of signal connections by direction.",
+            &["kind"],
             nl.clone(),
         );
         let session_join_latency = hist_vec(
@@ -192,6 +205,105 @@ impl Metrics {
             &["direction", "transmission"],
             nl.clone(),
         );
+        let nack_total = counter_vec(
+            "livekit_nack_total",
+            "Total RTCP NACKs received by direction.",
+            &["direction", "country"],
+            nl.clone(),
+        );
+        let pli_total = counter_vec(
+            "livekit_pli_total",
+            "Total RTCP PLIs received by direction.",
+            &["direction", "country"],
+            nl.clone(),
+        );
+        let fir_total = counter_vec(
+            "livekit_fir_total",
+            "Total RTCP FIRs received by direction.",
+            &["direction", "country"],
+            nl.clone(),
+        );
+        let stream_labels = &["direction", "source", "type", "country"];
+        let packet_loss_percent = hist_vec(
+            "livekit_packet_loss_percent",
+            "Packet loss percentage by stream.",
+            &[0.0, 0.1, 0.3, 0.5, 0.7, 1.0, 5.0, 10.0, 40.0, 100.0],
+            stream_labels,
+            nl.clone(),
+        );
+        let packet_loss_total = counter_vec(
+            "livekit_packet_loss_total",
+            "Total packets lost by stream.",
+            stream_labels,
+            nl.clone(),
+        );
+        let packet_out_of_order_percent = hist_vec(
+            "livekit_packet_out_of_order_percent",
+            "Out-of-order packet percentage by stream.",
+            &[0.0, 0.1, 0.3, 0.5, 0.7, 1.0, 5.0, 10.0, 40.0, 100.0],
+            stream_labels,
+            nl.clone(),
+        );
+        let packet_out_of_order_total = counter_vec(
+            "livekit_packet_out_of_order_total",
+            "Total out-of-order packets by stream.",
+            stream_labels,
+            nl.clone(),
+        );
+        let jitter_us = hist_vec(
+            "livekit_jitter_us",
+            "Interarrival jitter in microseconds by stream.",
+            &[
+                1000.0, 10000.0, 30000.0, 50000.0, 70000.0, 100000.0, 300000.0, 600000.0, 1000000.0,
+            ],
+            stream_labels,
+            nl.clone(),
+        );
+        let rtt_ms = hist_vec(
+            "livekit_rtt_ms",
+            "Round-trip time in milliseconds by stream.",
+            &[
+                50.0, 100.0, 150.0, 200.0, 250.0, 500.0, 750.0, 1000.0, 5000.0, 10000.0,
+            ],
+            stream_labels,
+            nl.clone(),
+        );
+        let forward_latency = prometheus::Gauge::with_opts(
+            Opts::new(
+                "livekit_forward_latency",
+                "Long-term average forwarding latency (ns).",
+            )
+            .const_labels(nl.clone()),
+        )
+        .expect("forward latency gauge");
+        let forward_jitter = prometheus::Gauge::with_opts(
+            Opts::new(
+                "livekit_forward_jitter",
+                "Long-term forwarding jitter, stddev (ns).",
+            )
+            .const_labels(nl.clone()),
+        )
+        .expect("forward jitter gauge");
+        let forward_latency_ns = Histogram::with_opts(
+            HistogramOpts::new(
+                "livekit_forward_latency_ns",
+                "Per-packet forwarding latency (ns).",
+            )
+            .const_labels(nl.clone())
+            .buckets(vec![
+                50_000.0,
+                100_000.0,
+                250_000.0,
+                500_000.0,
+                1_000_000.0,
+                2_000_000.0,
+                3_000_000.0,
+                5_000_000.0,
+                10_000_000.0,
+                20_000_000.0,
+            ]),
+        )
+        .expect("forward latency histogram");
 
         let m = Metrics {
             registry,
@@ -199,7 +311,7 @@ impl Metrics {
             room_duration,
             participant_total,
             participant_join,
-            connections,
+            connection_total,
             session_join_latency,
             session_start_time,
             session_duration,
@@ -211,6 +323,18 @@ impl Metrics {
             quality_score,
             packet_total,
             packet_bytes,
+            nack_total,
+            pli_total,
+            fir_total,
+            packet_loss_percent,
+            packet_loss_total,
+            packet_out_of_order_percent,
+            packet_out_of_order_total,
+            jitter_us,
+            rtt_ms,
+            forward_latency,
+            forward_jitter,
+            forward_latency_ns,
         };
         m.register_all();
         m.prime();
@@ -221,8 +345,15 @@ impl Metrics {
     /// exposed (even at zero), keeping dashboards populated from first boot.
     fn prime(&self) {
         self.participant_join
-            .with_label_values(&["signal_connected"]);
-        self.participant_join.with_label_values(&["signal_failed"]);
+            .with_label_values(&["signal_connected", ""]);
+        self.participant_join
+            .with_label_values(&["signal_failed", ""]);
+        self.participant_join
+            .with_label_values(&["signal_validation_failed", ""]);
+        self.participant_join
+            .with_label_values(&["signal_upgrade_failed", ""]);
+        self.connection_total.with_label_values(&["incoming"]);
+        self.connection_total.with_label_values(&["outgoing"]);
         self.track_published.with_label_values(&["audio"]);
         self.track_subscribed.with_label_values(&["audio"]);
         self.track_publish_counter
@@ -244,6 +375,22 @@ impl Metrics {
             .with_label_values(&["incoming", "initial"]);
         self.packet_bytes
             .with_label_values(&["outgoing", "initial"]);
+        for d in ["incoming", "outgoing"] {
+            self.nack_total.with_label_values(&[d, ""]);
+            self.pli_total.with_label_values(&[d, ""]);
+            self.fir_total.with_label_values(&[d, ""]);
+            for labels in [
+                &["incoming", "audio", "audio", ""],
+                &["outgoing", "audio", "audio", ""],
+            ] {
+                self.packet_loss_percent.with_label_values(labels);
+                self.packet_loss_total.with_label_values(labels);
+                self.packet_out_of_order_percent.with_label_values(labels);
+                self.packet_out_of_order_total.with_label_values(labels);
+                self.jitter_us.with_label_values(labels);
+                self.rtt_ms.with_label_values(labels);
+            }
+        }
     }
 
     fn register_all(&self) {
@@ -258,7 +405,7 @@ impl Metrics {
         reg!(self.room_duration);
         reg!(self.participant_total);
         reg!(self.participant_join);
-        reg!(self.connections);
+        reg!(self.connection_total);
         reg!(self.session_join_latency);
         reg!(self.session_start_time);
         reg!(self.session_duration);
@@ -270,6 +417,18 @@ impl Metrics {
         reg!(self.quality_score);
         reg!(self.packet_total);
         reg!(self.packet_bytes);
+        reg!(self.nack_total);
+        reg!(self.pli_total);
+        reg!(self.fir_total);
+        reg!(self.packet_loss_percent);
+        reg!(self.packet_loss_total);
+        reg!(self.packet_out_of_order_percent);
+        reg!(self.packet_out_of_order_total);
+        reg!(self.jitter_us);
+        reg!(self.rtt_ms);
+        reg!(self.forward_latency);
+        reg!(self.forward_jitter);
+        reg!(self.forward_latency_ns);
     }
 
     /// Renders the text/plain Prometheus exposition format.
@@ -302,7 +461,7 @@ mod tests {
             "livekit_room_duration_seconds",
             "livekit_participant_total",
             "livekit_participant_join_total",
-            "livekit_connections",
+            "livekit_connection_total",
             "livekit_track_published_total",
             "livekit_track_subscribed_total",
             "livekit_track_publish_counter_total",
@@ -314,6 +473,18 @@ mod tests {
             "livekit_quality_score",
             "livekit_packet_total",
             "livekit_packet_bytes",
+            "livekit_nack_total",
+            "livekit_pli_total",
+            "livekit_fir_total",
+            "livekit_packet_loss_percent",
+            "livekit_packet_loss_total",
+            "livekit_packet_out_of_order_percent",
+            "livekit_packet_out_of_order_total",
+            "livekit_jitter_us",
+            "livekit_rtt_ms",
+            "livekit_forward_latency",
+            "livekit_forward_jitter",
+            "livekit_forward_latency_ns",
         ] {
             assert!(
                 out.contains(&format!("# TYPE {name} ")),

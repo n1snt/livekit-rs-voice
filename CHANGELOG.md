@@ -26,10 +26,11 @@ always reflects the LiveKit protocol level the server implements.
 - `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules
   through the Twirp API.
 - Drop-in Prometheus metrics matching the reference `livekit-server` names,
-  labels, and histogram buckets (rooms, participants, connections, tracks,
-  session latency/duration, connection-quality score, RTP packets), so
-  existing LiveKit Grafana dashboards work unchanged. See
-  `crates/lk-server/src/metrics.rs` for the emitted set.
+  labels, and histogram buckets: rooms, participants, connections, tracks,
+  session latency/duration, connection-quality score, RTP packets, RTCP
+  feedback (NACK/PLI/FIR), per-stream packet loss/out-of-order/jitter/RTT,
+  and forwarding latency (from RTCP sender reports). Existing LiveKit
+  Grafana dashboards work unchanged. See `crates/lk-server/src/metrics.rs`.
 
 ### Fixed
 

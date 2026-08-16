@@ -50,6 +50,17 @@ impl TrackSource {
             _ => TrackSource::Unknown,
         }
     }
+
+    /// Reference `TrackSource.String()` value (used for metric labels).
+    pub fn source_str(self) -> &'static str {
+        match self {
+            TrackSource::Unknown => "unknown",
+            TrackSource::Camera => "camera",
+            TrackSource::Microphone => "microphone",
+            TrackSource::ScreenShare => "screen_share",
+            TrackSource::ScreenShareAudio => "screen_share_audio",
+        }
+    }
 }
 
 /// Maps a grant's `canPublishSources` string to the wire `TrackSource` value.
