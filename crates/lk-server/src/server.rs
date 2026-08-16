@@ -24,6 +24,7 @@ pub struct Server {
     pub store: Arc<crate::redis_store::Store>,
     pub cluster: Arc<crate::cluster::Cluster>,
     pub sip: tokio::sync::OnceCell<Arc<crate::psrpc::SipInternalClient>>,
+    pub sip_io: tokio::sync::OnceCell<Arc<crate::psrpc::SipIoServer>>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
 }
 
@@ -66,6 +67,7 @@ impl Server {
             store,
             cluster,
             sip: tokio::sync::OnceCell::new(),
+            sip_io: tokio::sync::OnceCell::new(),
             rooms: Mutex::new(HashMap::new()),
         })
     }
@@ -129,6 +131,49 @@ impl Server {
         Ok(client)
     }
 
+    /// Starts the `IOInfoSIP` psrpc server on the Redis bus (the shared bus
+    /// with the `livekit/sip` container). Serves inbound trunk auth, dispatch
+    /// rule evaluation, and call-state recording.
+    pub async fn start_sip_io(&self) -> Result<(), String> {
+        if self.sip_io.get().is_some() {
+            return Ok(());
+        }
+        if !self.config.redis.is_configured() {
+            return Err(
+                "inbound SIP requires redis (psrpc bus) and a livekit/sip bridge".to_string(),
+            );
+        }
+        self.start_sip_io_with(Arc::new(crate::psrpc::RedisBus::new(&self.config)))
+            .await
+    }
+
+    /// Starts the `IOInfoSIP` psrpc server over the given bus. Tests inject an
+    /// in-memory bus.
+    pub async fn start_sip_io_with(
+        &self,
+        bus: Arc<dyn crate::psrpc::PsrpcBus>,
+    ) -> Result<(), String> {
+        if self.sip_io.get().is_some() {
+            return Ok(());
+        }
+        let io = crate::psrpc::SipIoServer::new(bus.clone()).await?;
+        let handlers: Arc<dyn crate::psrpc::IoHandler> =
+            Arc::new(crate::ioservice::SipIoHandlers {
+                store: self.store.clone(),
+            });
+        for method in [
+            "GetSIPTrunkAuthentication",
+            "EvaluateSIPDispatchRules",
+            "UpdateSIPCallState",
+            "RecordCallContext",
+        ] {
+            io.register(method, handlers.clone()).await?;
+        }
+        let _ = self.sip_io.set(io);
+        tracing::info!("SIP IO service started (psrpc)");
+        Ok(())
+    }
+
     pub fn list_rooms(&self) -> Vec<Arc<Room>> {
         self.rooms.lock().unwrap().values().cloned().collect()
     }
@@ -176,6 +221,15 @@ impl Server {
             tokio::spawn(async move {
                 if let Err(e) = crate::turn::start_turn_server(&config, keys).await {
                     tracing::error!("failed to start TURN server: {e}");
+                }
+            });
+        }
+        // IOInfoSIP psrpc server for inbound calls (when Redis is configured).
+        {
+            let server = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = server.start_sip_io().await {
+                    tracing::info!("SIP IO service not started: {e}");
                 }
             });
         }

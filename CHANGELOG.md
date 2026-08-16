@@ -19,9 +19,10 @@ always reflects the LiveKit protocol level the server implements.
 ### Added
 
 - TURN relay (RFC 8489/5766) with JoinResponse ICE server credentials.
-- Outbound SIP bridging over the psrpc wire protocol (v0.7 Redis PubSub):
-  `CreateSIPParticipant` / `TransferSIPParticipant` reach a real `livekit/sip`
-  container over a shared Redis bus.
+- Full SIP over the psrpc wire protocol (v0.7 Redis PubSub): outbound
+  `CreateSIPParticipant` / `TransferSIPParticipant` reach a real
+  `livekit/sip` container, and the embedded `IOInfoSIP` service serves
+  inbound calls (trunk authentication, dispatch-rule evaluation, call state).
 - `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules
   through the Twirp API.
 

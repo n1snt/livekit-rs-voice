@@ -64,7 +64,9 @@ crates/lk-server/   the server:
   room.rs / participant.rs / track.rs   state models.
   agent.rs          worker registry + job dispatch (/agent).
   services.rs / services_sip.rs   Twirp method implementations.
-  psrpc.rs          psrpc v0.7 wire client (Redis PubSub) for outbound SIP.
+  psrpc.rs          psrpc v0.7 wire protocol (Redis PubSub): client for
+                    outbound SIP, server for the IOInfoSIP service.
+  ioservice.rs      IOInfoSIP handlers (inbound trunk auth + dispatch rules).
   redis_store.rs    optional Redis store for SIP/egress container interop.
   webhook.rs / server.rs / metrics.rs  webhooks, room manager, metrics.
 ```

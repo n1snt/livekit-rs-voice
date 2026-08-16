@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "livekit_webhook.proto",
         "internal.proto",
         "rpc/sip.proto",
+        "rpc/io.proto",
     ];
     let files: Vec<String> = files
         .iter()

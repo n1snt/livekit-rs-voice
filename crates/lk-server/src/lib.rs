@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod config;
 pub mod core;
 pub mod http;
+pub mod ioservice;
 pub mod media;
 pub mod metrics;
 pub mod participant;

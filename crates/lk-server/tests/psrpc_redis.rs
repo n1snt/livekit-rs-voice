@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use lk_proto::internal;
+use lk_proto::livekit as lk;
 use lk_proto::rpc;
 use prost::Message as _;
 
@@ -131,4 +132,60 @@ async fn redis_bus_round_trips_full_claim_flow() {
     let ireq = rpc::InternalCreateSipParticipantRequest::decode(got[0].as_slice()).unwrap();
     assert_eq!(ireq.room_name, "room-real");
     assert_eq!(ireq.call_to, "+1777");
+}
+
+#[tokio::test]
+async fn io_server_round_trips_over_real_redis() {
+    let Some(addr) = redis_addr() else {
+        eprintln!("skipping: REDIS_ADDR not set");
+        return;
+    };
+    let config = config_with_redis(&addr);
+    let bus: Arc<RedisBus> = Arc::new(RedisBus::new(&config));
+    let server = lk_server::server::Server::new(config);
+    server
+        .store
+        .store_sip_inbound_trunk(&lk::SipInboundTrunkInfo {
+            sip_trunk_id: "ST_real".to_string(),
+            numbers: vec!["+1555".to_string()],
+            auth_username: "u".to_string(),
+            auth_password: "p".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    server
+        .start_sip_io_with(bus.clone())
+        .await
+        .expect("io server starts");
+
+    let client = lk_server::psrpc::SipInternalClient::new_with_service(
+        bus,
+        "IOInfoSIP",
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let auth_req = rpc::GetSipTrunkAuthenticationRequest {
+        call: Some(rpc::SipCall {
+            from: Some(lk::SipUri {
+                user: "+1999".to_string(),
+                ..Default::default()
+            }),
+            to: Some(lk::SipUri {
+                user: "+1555".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let raw = client
+        .request("GetSIPTrunkAuthentication", &auth_req)
+        .await
+        .expect("auth over real redis");
+    let auth = rpc::GetSipTrunkAuthenticationResponse::decode(raw.as_slice()).unwrap();
+    assert_eq!(auth.sip_trunk_id, "ST_real");
+    assert_eq!(auth.username, "u");
+    assert_eq!(auth.password, "p");
 }

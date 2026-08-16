@@ -1,0 +1,201 @@
+syntax = "proto3";
+
+package rpc;
+
+option go_package = "github.com/livekit/protocol/rpc";
+
+// IOInfoSIP RPC payloads (the SIP section of livekit/protocol rpc/io.proto).
+// Field numbers match the reference so these serialize identically on the
+// psrpc wire. Service/method definitions and the logger field annotations are
+// omitted: the RPC server is implemented by hand in lk-server's psrpc module.
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "livekit_models.proto";
+import "livekit_room.proto";
+import "livekit_sip.proto";
+
+message GetSIPTrunkAuthenticationRequest {
+  string sip_call_id = 6 [deprecated = true];
+
+  // What Number is calling
+  string from = 2 [deprecated = true];
+  // What Host is calling
+  string from_host = 7 [deprecated = true];
+
+  // What Number was called
+  string to = 3 [deprecated = true];
+  // What Host was called
+  string to_host = 5 [deprecated = true];
+
+  // What is the IP address of the called number
+  string src_address = 4 [deprecated = true];
+
+  SIPCall call = 8;
+
+  // NEXT ID: 9
+}
+
+message GetSIPTrunkAuthenticationResponse {
+  // Expected username and password
+  string username = 1;
+  string password = 2;
+  string realm = 9;
+  bool drop = 3;
+  // Trunk used to fulfill this request
+  string sip_trunk_id = 4;
+  // Used in Cloud only
+  string project_id = 5;
+  livekit.ProviderInfo provider_info = 6;
+  // Error code if authentication failed
+  SIPTrunkAuthenticationError error_code = 7;
+
+  // Optional per-project feature flag set
+  map<string, string> feature_flags = 8;
+
+  SIPCallObservability observability = 10;
+
+  // NEXT ID: 11
+}
+
+message EvaluateSIPDispatchRulesRequest {
+  string sip_call_id = 8 [deprecated = true];
+  string sip_participant_id = 1 [deprecated = true];
+  // Trunk from the auth response, if any
+  string sip_trunk_id = 10;
+
+  // What Number is calling
+  string calling_number = 2 [deprecated = true];
+
+  // What Host is calling
+  string calling_host = 11 [deprecated = true];
+
+  // What Number was called
+  string called_number = 3 [deprecated = true];
+
+  // What is the IP address of the called number
+  string src_address = 4 [deprecated = true];
+
+  // What pin has been entered if any
+  string pin = 5;
+
+  // Caller rejected pin prompt, only try public rooms
+  bool no_pin = 6;
+
+  // What Host was called
+  string called_host = 7 [deprecated = true];
+
+  // Extra participant attributes added for this call.
+  map<string, string> extra_attributes = 9;
+
+  SIPCall call = 12;
+
+  // NEXT ID: 13
+}
+
+message EvaluateSIPDispatchRulesResponse {
+  // non-empty string if SIPParticipant should be placed a room
+  string room_name = 1;
+
+  // What should be used for the LiveKit participant identity
+  string participant_identity = 2;
+  // What should be used for the LiveKit participant name
+  string participant_name = 7;
+  // What should be used for the LiveKit participant metadata
+  string participant_metadata = 8;
+  // What should be used for the LiveKit participant attributes
+  map<string, string> participant_attributes = 11;
+
+  bool request_pin = 3 [deprecated = true];
+
+  // optional token that should be used when creating LiveKit participant
+  string token = 4;
+
+  // optional websocket url that should be used when creating LiveKit participant
+  string ws_url = 5;
+
+  SIPDispatchResult result = 6;
+
+  // Trunk used to fulfill this request
+  string sip_trunk_id = 9;
+  // Dispatch Rule used to fulfill this request
+  string sip_dispatch_rule_id = 10;
+
+  // Used in Cloud only
+  string project_id = 12;
+
+  // Include these SIP X-* headers in 200 OK response to INVITE.
+  map<string, string> headers = 13;
+  // Map SIP X-* headers from INVITE to SIP participant attributes.
+  map<string, string> headers_to_attributes = 14;
+  // Map LiveKit attributes to SIP X-* headers when sending BYE or REFER requests.
+  map<string, string> attributes_to_headers = 18;
+  // Map SIP headers from INVITE to sip.h.* participant attributes automatically.
+  livekit.SIPHeaderOptions include_headers = 19;
+
+  repeated livekit.SIPFeature enabled_features = 15;
+
+  // Max time for the caller to wait for track subscription.
+  google.protobuf.Duration ringing_timeout = 16;
+  // Max call duration.
+  google.protobuf.Duration max_call_duration = 17;
+
+  // Room preset and config are used only to generate tokens
+  string room_preset = 20;
+  livekit.RoomConfiguration room_config = 21;
+
+  livekit.SIPMediaEncryption media_encryption = 22 [deprecated = true];
+  livekit.SIPMediaConfig media = 24;
+
+  map<string, string> feature_flags = 23;
+
+  // NEXT ID: 25
+}
+
+message SIPCallObservability {
+  string destination = 1;
+  uint32 lifetime_days = 2;
+
+  string carrier_id = 3;
+  string country_code = 4;
+  livekit.PhoneNumberType number_type = 5;
+}
+
+message UpdateSIPCallStateRequest {
+  livekit.SIPCallInfo call_info = 1;
+  livekit.SIPTransferInfo transfer_info = 2;
+
+  // NEXT ID: 3
+}
+
+message RecordCallContextRequest {
+  livekit.SIPCallInfo call_info = 1;
+
+  // NEXT ID: 2
+}
+
+enum SIPDispatchResult {
+  LEGACY_ACCEPT_OR_PIN = 0;  // check request_pin field
+  ACCEPT = 1;
+  REQUEST_PIN = 2;
+  REJECT = 3;
+  DROP = 4;
+}
+
+enum SIPTrunkAuthenticationError {
+  SIP_TRUNK_AUTH_ERROR_NONE = 0;
+  SIP_TRUNK_AUTH_ERROR_QUOTA_EXCEEDED = 1;
+  SIP_TRUNK_AUTH_ERROR_NO_TRUNK_FOUND = 2;
+}
+
+message SIPCall {
+  string lk_call_id = 1;
+  string source_ip = 2;             // source ip (without port)
+  livekit.SIPUri address = 3;       // address in the request line (INVITE)
+  livekit.SIPUri from = 4;          // From header
+  livekit.SIPUri to = 5;            // To header
+  repeated livekit.SIPUri via = 6;  // Via headers
+  string sip_call_id = 7;           // SIP protocol generated call ID
+  string project_id = 8;            // LiveKit project ID (Cloud only)
+  map<string, string> features = 9;
+}

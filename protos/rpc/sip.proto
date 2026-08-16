@@ -13,6 +13,7 @@ option go_package = "github.com/livekit/protocol/rpc";
 import "google/protobuf/duration.proto";
 import "livekit_models.proto";
 import "livekit_sip.proto";
+import "rpc/io.proto";
 
 message InternalCreateSIPParticipantRequest {
   // Used in Cloud only
@@ -89,7 +90,7 @@ message InternalCreateSIPParticipantRequest {
   // Project-level feature flags from ProjectSettings.FeatureFlags
   map<string, string> feature_flags = 33;
 
-  SIPCallObservability observability = 38;
+  rpc.SIPCallObservability observability = 38;
 
   // NEXT ID: 39
 }
@@ -115,13 +116,4 @@ message InternalTransferSIPParticipantRequest {
 
   // Project-level feature flags from ProjectSettings.FeatureFlags
   map<string, string> feature_flags = 6;
-}
-
-message SIPCallObservability {
-  string destination = 1;
-  uint32 lifetime_days = 2;
-
-  string carrier_id = 3;
-  string country_code = 4;
-  livekit.PhoneNumberType number_type = 5;
 }

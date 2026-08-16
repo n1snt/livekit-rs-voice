@@ -306,9 +306,19 @@ impl SipInternalClient {
         bus: Arc<dyn PsrpcBus>,
         timeout: Duration,
     ) -> Result<Arc<Self>, String> {
+        Self::new_with_service(bus, SIP_SERVICE, timeout).await
+    }
+
+    /// Builds a client for an arbitrary psrpc service (used for the
+    /// `IOInfoSIP` service in tests and tooling).
+    pub async fn new_with_service(
+        bus: Arc<dyn PsrpcBus>,
+        service: &str,
+        timeout: Duration,
+    ) -> Result<Arc<Self>, String> {
         let client = Arc::new(SipInternalClient {
             bus,
-            service: SIP_SERVICE.to_string(),
+            service: service.to_string(),
             client_id: new_id("CLI_"),
             pending: Arc::new(Mutex::new(HashMap::new())),
             timeout,
@@ -379,6 +389,17 @@ impl SipInternalClient {
         self.request_single("TransferSIPParticipant", sip_call_id, payload, self.timeout)
             .await?;
         Ok(())
+    }
+
+    /// Generic single request against this service: publish `req` for
+    /// `method` and return the raw response payload.
+    pub async fn request(
+        &self,
+        method: &str,
+        req: &impl prost::Message,
+    ) -> Result<Vec<u8>, PsrpcError> {
+        let payload = req.encode_to_vec();
+        self.request_single(method, "", payload, self.timeout).await
     }
 
     /// Runs a single queue RPC: publish the request, negotiate the claim, and
@@ -473,6 +494,133 @@ impl SipInternalClient {
             });
         }
         Ok(resp.raw_response)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SipIoServer (psrpc server hosting the `IOInfoSIP` service)
+// ---------------------------------------------------------------------------
+
+/// Handler for one `IOInfoSIP` method: takes the raw request payload and
+/// returns the raw response payload (or an error string that becomes the
+/// RPC error).
+#[async_trait::async_trait]
+pub trait IoHandler: Send + Sync {
+    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String>;
+}
+
+/// psrpc server that hosts the `livekit.sip` `IOInfoSIP` service. The
+/// `livekit/sip` container is a psrpc *client* of this service for inbound
+/// trunk authentication, dispatch-rule evaluation, and call-state recording.
+///
+/// For each registered method it subscribes to the method's RPC channel,
+/// bids on the caller's CLAIM channel, waits for the grant on RCLAIM, and
+/// answers on the caller's RES channel — mirroring the psrpc v0.7 server
+/// half.
+pub struct SipIoServer {
+    bus: Arc<dyn PsrpcBus>,
+    service: String,
+    server_id: String,
+}
+
+impl SipIoServer {
+    pub async fn new(bus: Arc<dyn PsrpcBus>) -> Result<Arc<Self>, String> {
+        Ok(Arc::new(SipIoServer {
+            bus,
+            service: "IOInfoSIP".to_string(),
+            server_id: new_id("SRV_"),
+        }))
+    }
+
+    /// Starts listening for `method` and dispatches requests to `handler`.
+    pub async fn register(
+        self: &Arc<Self>,
+        method: &str,
+        handler: Arc<dyn IoHandler>,
+    ) -> Result<(), String> {
+        let rpc_ch = rpc_channel(&self.service, method, "");
+        let rclaim_ch = claim_response_channel(&self.service, method, "");
+        let mut stream = self
+            .bus
+            .subscribe(vec![rpc_ch.clone(), rclaim_ch.clone()])
+            .await?;
+        let bus = self.bus.clone();
+        let service = self.service.clone();
+        let server_id = self.server_id.clone();
+        let method = method.to_string();
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            // request_id -> (client_id, raw_request, expiry)
+            let mut pending: HashMap<String, (String, Vec<u8>, i64)> = HashMap::new();
+            while let Some((channel, payload)) = stream.next().await {
+                let Ok(env) = internal::Msg::decode(payload.as_slice()) else {
+                    continue;
+                };
+                if channel == rpc_ch {
+                    let Ok(req) = internal::Request::decode(env.value.as_slice()) else {
+                        continue;
+                    };
+                    let now = unix_nanos();
+                    if req.expiry <= now {
+                        continue;
+                    }
+                    // Drop requests that were never granted past their expiry.
+                    pending.retain(|_, (_, _, exp)| *exp > now);
+                    let client_id = req.client_id.clone();
+                    let raw = req.raw_request.clone();
+                    pending.insert(req.request_id.clone(), (client_id.clone(), raw, req.expiry));
+                    let claim = internal::ClaimRequest {
+                        request_id: req.request_id.clone(),
+                        server_id: server_id.clone(),
+                        affinity: 1.0,
+                        handling: false,
+                    };
+                    let _ = bus
+                        .publish(
+                            &claim_request_channel(&service, &client_id),
+                            envelope("internal.ClaimRequest", &claim),
+                        )
+                        .await;
+                } else if channel == rclaim_ch {
+                    let Ok(grant) = internal::ClaimResponse::decode(env.value.as_slice()) else {
+                        continue;
+                    };
+                    if grant.server_id != server_id {
+                        continue;
+                    }
+                    let Some((client_id, raw, _)) = pending.remove(&grant.request_id) else {
+                        continue;
+                    };
+                    let bus = bus.clone();
+                    let service = service.clone();
+                    let server_id = server_id.clone();
+                    let handler = handler.clone();
+                    let method = method.clone();
+                    tokio::spawn(async move {
+                        let mut resp = internal::Response {
+                            request_id: grant.request_id,
+                            server_id,
+                            sent_at: unix_nanos(),
+                            ..Default::default()
+                        };
+                        match handler.handle(&method, raw).await {
+                            Ok(bytes) => resp.raw_response = bytes,
+                            Err(e) => {
+                                resp.error = e;
+                                resp.code = "internal".to_string();
+                            }
+                        }
+                        let _ = bus
+                            .publish(
+                                &response_channel(&service, &client_id),
+                                envelope("internal.Response", &resp),
+                            )
+                            .await;
+                    });
+                }
+            }
+        });
+        Ok(())
     }
 }
 
@@ -689,5 +837,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, PsrpcError::Timeout));
+    }
+
+    struct EchoHandler;
+
+    #[async_trait::async_trait]
+    impl IoHandler for EchoHandler {
+        async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+            let req = internal::Request::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+            let mut resp = internal::Request {
+                request_id: req.request_id,
+                ..Default::default()
+            };
+            resp.metadata.insert(method.to_string(), "echo".to_string());
+            Ok(resp.encode_to_vec())
+        }
+    }
+
+    #[tokio::test]
+    async fn io_server_serves_claim_flow() {
+        let bus = MemoryBus::new();
+        let io = SipIoServer::new(bus.clone()).await.unwrap();
+        io.register("GetSIPTrunkAuthentication", Arc::new(EchoHandler))
+            .await
+            .unwrap();
+
+        let client = SipInternalClient::new_with_service(bus, "IOInfoSIP", Duration::from_secs(2))
+            .await
+            .unwrap();
+        let req = internal::Request {
+            request_id: "REQ_test".to_string(),
+            ..Default::default()
+        };
+        let resp = client
+            .request("GetSIPTrunkAuthentication", &req)
+            .await
+            .unwrap();
+        let decoded = internal::Request::decode(resp.as_slice()).unwrap();
+        assert_eq!(
+            decoded
+                .metadata
+                .get("GetSIPTrunkAuthentication")
+                .map(String::as_str),
+            Some("echo")
+        );
     }
 }
