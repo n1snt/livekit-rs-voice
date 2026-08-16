@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use lk_proto::livekit as lk;
 use tokio::sync::mpsc;
 
-use crate::audio::{decode_opus, SAMPLE_RATE};
+use crate::audio::{OpusDecoder, SAMPLE_RATE};
 use crate::client::AudioPacket;
 use crate::mp3::Mp3Encoder;
 use crate::wav::WavWriter;
@@ -70,6 +70,7 @@ pub async fn run_recording(
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<u64, String> {
     let mut mixer = Mixer::new();
+    let mut decoders: HashMap<String, OpusDecoder> = HashMap::new();
     let mut wav = if format == OutputFormat::Wav {
         Some(WavWriter::create(path, 1, SAMPLE_RATE)?)
     } else {
@@ -88,14 +89,18 @@ pub async fn run_recording(
             _ = cancel.changed() => None,
         };
         let Some(packet) = packet else { break };
-        let pcm = match decode_opus(&packet.payload) {
-            Ok(pcm) => pcm,
+        let decoder = decoders
+            .entry(packet.track_cid.clone())
+            .or_insert_with(|| OpusDecoder::new().expect("opus decoder"));
+        match decoder.decode(&packet.payload) {
+            Ok(pcm) => {
+                mixer.push(&packet.track_cid, pcm);
+            }
             Err(e) => {
-                tracing::debug!(len = packet.payload.len(), "decode_opus failed: {e}");
+                tracing::debug!(len = packet.payload.len(), "opus decode failed: {e}");
                 continue;
             }
-        };
-        mixer.push(&packet.track_cid, pcm);
+        }
         // Drain fixed-size frames; mix whatever is available in all tracks.
         while mixer.available() >= FRAME_SAMPLES {
             let frame = mixer.read_frame(FRAME_SAMPLES);

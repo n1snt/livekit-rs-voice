@@ -198,6 +198,27 @@ async fn publish(
         .await
         .map_err(|e| e.to_string())?;
     let ws = Arc::new(tokio::sync::Mutex::new(ws));
+
+    // Keep the signal connection alive (the server closes sessions that send
+    // no frames within its ~15s ping timeout).
+    let ws_keepalive = ws.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let mut ws = ws_keepalive.lock().await;
+            let _ = send_request(
+                &mut ws,
+                &lk::SignalRequest {
+                    message: Some(lk::signal_request::Message::PingReq(lk::Ping {
+                        timestamp: lk_egress::now_secs() * 1000,
+                        rtt: 0,
+                    })),
+                },
+            )
+            .await;
+        }
+    });
+
     let mut guard = ws.lock().await;
     let _ = read_response(&mut guard).await; // join
     let sub_offer_sdp = match read_response(&mut guard).await.message {
@@ -324,6 +345,7 @@ async fn publish(
     }
     println!("sent {frames} frames to room {room}");
     // Stay joined a moment so the recorder drains, then leave.
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     let _ = ws.lock().await;
     Ok(())

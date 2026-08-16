@@ -182,6 +182,30 @@ pub async fn connect(
     let (audio_tx, audio_rx) = mpsc::channel::<AudioPacket>(256);
     let (out_tx, mut out_rx) = mpsc::channel::<lk::SignalRequest>(64);
 
+    // Keep the signal connection alive: the server closes sessions that send
+    // no frames within its ping timeout (~15s). The recorder only needs to
+    // read, so it never otherwise sends.
+    {
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if out_tx
+                    .send(lk::SignalRequest {
+                        message: Some(lk::signal_request::Message::PingReq(lk::Ping {
+                            timestamp: crate::now_secs() * 1000,
+                            rtt: 0,
+                        })),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
     // Read until the JoinResponse arrives (first frame).
     loop {
         let frame = futures_util::StreamExt::next(&mut ws).await;

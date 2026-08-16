@@ -9,18 +9,38 @@ use audiopus::{Channels, MutSignals, SampleRate};
 pub const SAMPLE_RATE: u32 = 48000;
 
 /// Decodes one Opus RTP payload into 16-bit PCM mono.
+/// An Opus decoder. One instance should be reused per track (the decoder is
+/// stateful and creation is expensive).
+pub struct OpusDecoder {
+    decoder: Decoder,
+}
+
+impl OpusDecoder {
+    pub fn new() -> Result<Self, String> {
+        Ok(OpusDecoder {
+            decoder: Decoder::new(SampleRate::Hz48000, Channels::Mono)
+                .map_err(|e| format!("opus decoder: {e}"))?,
+        })
+    }
+
+    /// Decodes one Opus RTP payload into 16-bit PCM mono.
+    pub fn decode(&mut self, payload: &[u8]) -> Result<Vec<i16>, String> {
+        let packet = Packet::try_from(payload).map_err(|e| format!("opus packet: {e}"))?;
+        let mut out = vec![0i16; 5760];
+        let signals =
+            MutSignals::try_from(out.as_mut_slice()).map_err(|e| format!("opus output: {e}"))?;
+        let n = self
+            .decoder
+            .decode(Some(packet), signals, false)
+            .map_err(|e| format!("opus decode: {e}"))?;
+        out.truncate(n);
+        Ok(out)
+    }
+}
+
+/// Decodes one Opus payload with a fresh decoder (tests / one-off use).
 pub fn decode_opus(payload: &[u8]) -> Result<Vec<i16>, String> {
-    let mut decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)
-        .map_err(|e| format!("opus decoder: {e}"))?;
-    let packet = Packet::try_from(payload).map_err(|e| format!("opus packet: {e}"))?;
-    let mut out = vec![0i16; 5760];
-    let signals =
-        MutSignals::try_from(out.as_mut_slice()).map_err(|e| format!("opus output: {e}"))?;
-    let n = decoder
-        .decode(Some(packet), signals, false)
-        .map_err(|e| format!("opus decode: {e}"))?;
-    out.truncate(n);
-    Ok(out)
+    OpusDecoder::new()?.decode(payload)
 }
 
 /// Sums (with clipping) multiple same-length mono PCM frames into one mixed

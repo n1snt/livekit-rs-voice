@@ -258,6 +258,10 @@ pub async fn handle_participant_request(participant: &Arc<Participant>, req: lk:
 
 async fn handle_offer(participant: &Arc<Participant>, offer: lk::SessionDescription) {
     participant.set_state(ParticipantState::Joined);
+    if !participant.can_publish() {
+        tracing::warn!(sid = %participant.sid, "publish permission denied; ignoring offer");
+        return;
+    }
     match media::handle_publisher_offer(participant, &offer).await {
         Ok(answer) => {
             let resp = lk::SignalResponse {
@@ -871,8 +875,8 @@ pub async fn join_room(
     } else {
         grant.room.clone()
     };
-    if params.publish && !token.can_publish() {
-        return Err("publish permission denied".to_string());
+    if !params.publish && !token.can_subscribe() {
+        return Err("subscribe permission denied".to_string());
     }
 
     let room = server.get_or_create_room(&room_name);
