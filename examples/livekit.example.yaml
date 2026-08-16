@@ -5,8 +5,8 @@ keys:
   your-livekit-key: your-livekit-secret
 
 rtc:
-  tcp_port: 7881            # single UDP media port
-  # port_range_start: 50000 # or use a UDP range
+  tcp_port: 7881            # single media port (UDP defaults to this when unset)
+  # port_range_start: 50000 # or use a UDP port range instead
   # port_range_end: 60000
 
 room:
@@ -14,7 +14,7 @@ room:
   departure_timeout: 20
 
 # redis:
-#   address: 127.0.0.1:6379   # optional: interop with livekit/sip + livekit/egress
+#   address: 127.0.0.1:6379   # optional: interop with livekit/sip and livekit/egress
 # webhook:
 #   api_key: your-livekit-key
 #   urls: [https://example.com/livekit/webhook]

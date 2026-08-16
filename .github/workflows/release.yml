@@ -1,8 +1,10 @@
-# Publish a Docker image to GHCR when a version tag is pushed.
+# Publish a multi-arch Docker image to Docker Hub and GHCR when a version tag is pushed.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v1.13.5 && git push origin v1.13.5
 #
-# Images: ghcr.io/<owner>/livekit-rs-voice:v0.1.0 and :latest
+# Images:
+#   n1snt/livekit-rs-voice:1.13.5 and :latest
+#   ghcr.io/<owner>/livekit-rs-voice:1.13.5 and :latest
 name: Release
 
 on:
@@ -10,7 +12,6 @@ on:
     tags: ["v*"]
 
 env:
-  REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -23,10 +24,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -34,16 +48,18 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            n1snt/livekit-rs-voice
+            ghcr.io/${{ env.IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -4,8 +4,8 @@ Guidance for AI agents and contributors working in this repository.
 
 ## Project
 
-`livekit-rs-voice` is a **voice-only, LiveKit-wire-compatible SFU in Rust**. It
-is a drop-in for the audio path of `livekit-server`: existing LiveKit clients,
+`livekit-rs-voice` is a voice-only, LiveKit-wire-compatible SFU in Rust. It is
+a drop-in for the audio path of `livekit-server`: existing LiveKit clients,
 `livekit-agents`, and the `livekit/sip` + `livekit/egress` containers connect
 unchanged.
 
@@ -16,10 +16,13 @@ unchanged.
   or WebSocket framing. The vendored `.proto` files in `protos/` are the source
   of truth; if unsure about a wire name, check the generated code in
   `target/.../out/`.
-- **Audio only.** Video is out of scope; reject/ignore video tracks.
-- **Single node.** No clustering, no Redis in the signaling path.
+- **Audio only.** Video is out of scope; reject or ignore video tracks.
+- **Multi-node over Redis.** When `redis.cluster: true`, nodes register,
+  rooms are hosted on one node, and signaling is relayed to the hosting node
+  over Redis streams (`cluster.rs`). Rust-native only, no Go psrpc interop.
+  When disabled (default), every room is local.
 - **Lean docs.** The readme covers only benchmarks and the differences from
-  `livekit-server`. Don't add docs that re-document LiveKit behavior.
+  `livekit-server`. Do not add docs that re-document LiveKit behavior.
 - **Never add or commit secrets/API keys.**
 
 ## Commands
@@ -40,14 +43,14 @@ every push/PR. Keep all four green.
 
 ```
 crates/lk-proto/    prost types + protojson serde, generated from protos/
-                    (build.rs uses protox — no protoc binary needed).
+                    (build.rs uses protox, no protoc binary needed).
                     Edit the .proto files, never the generated code.
 crates/lk-server/   the server:
   config.rs         YAML config (LiveKit-compatible). Default impls must mirror
                     the reference defaults; partial YAML blocks must merge onto
                     them, not reset to zero.
-  auth.rs           HS256 JWT verification + video grants (iss→api key,
-                    sub→identity, canPublish/canSubscribe default true).
+  auth.rs           HS256 JWT verification + video grants (iss -> api key,
+                    sub -> identity, canPublish/canSubscribe default true).
   http.rs           axum router: Twirp dispatch, WS upgrades, auth, CORS,
                     body/message-size limits.
   signal.rs         WS sessions, join flow, SignalRequest handlers, webhooks.
@@ -74,9 +77,9 @@ crates/lk-server/   the server:
 - **No `unwrap()`/`expect()` on user-controlled input.** Use `Result`.
 - **Broadcasts are best-effort:** `send_update` (bounded `try_send`) for
   fan-out; awaited `send` for request/response messages.
-- **Don't block the join path on agent availability round-trips** — spawn them
+- **Do not block the join path on agent availability round-trips.** Spawn them
   (see `signal.rs` room-agent launch).
-- **Enforce configured limits** (`limit.*`, message/body sizes) — don't let a
+- **Enforce configured limits** (`limit.*`, message/body sizes). Do not let a
   client push unbounded data.
 
 ## Testing

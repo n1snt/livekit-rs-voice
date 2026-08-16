@@ -4,9 +4,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Releases are tagged `vX.Y.Z` and published as Docker images to GHCR.
+Releases are tagged `vX.Y.Z` and published as multi-arch (linux/amd64 and
+linux/arm64) Docker images to Docker Hub (`n1snt/livekit-rs-voice`) and GHCR.
+
+## Versioning policy
+
+Versions mirror [livekit-server](https://github.com/livekit/livekit) releases:
+`1.13.5` means "wire/protocol level of livekit-server 1.13.5". We bump the
+version to match whenever we pick up upstream protocol patches, so the version
+always reflects the LiveKit protocol level the server implements.
 
 ## [Unreleased]
+
+### Planned
+
+- Rust-native Redis clustering (multi-node room dispatch and presence); not yet
+  implemented.
+
+## [1.13.5] - 2026-08-16
 
 ### Added
 

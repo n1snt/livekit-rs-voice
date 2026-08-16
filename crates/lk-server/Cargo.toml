@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Drop-in LiveKit-compatible voice-only SFU server"
+description = "A voice-only LiveKit server in Rust."
 
 [[bin]]
 name = "livekit-voice"
@@ -45,6 +45,7 @@ flate2 = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 tokio-tungstenite = "0.26"
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

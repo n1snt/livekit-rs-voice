@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod audio_level;
 pub mod auth;
+pub mod cluster;
 pub mod config;
 pub mod core;
 pub mod http;

@@ -87,6 +87,10 @@ pub struct RedisConfig {
     pub db: i64,
     pub use_tls: bool,
     pub max_retries: i32,
+    /// Enable multi-node clustering (node registry + signaling relay over
+    /// Redis). Requires `address`. When false, this node runs standalone even
+    /// if Redis is configured (Redis is still used for SIP/egress interop).
+    pub cluster: bool,
 }
 
 impl RedisConfig {

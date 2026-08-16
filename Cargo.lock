@@ -1360,7 +1360,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "lk-proto"
-version = "0.1.0"
+version = "1.13.5"
 dependencies = [
  "bytes",
  "criterion",
@@ -1377,8 +1377,9 @@ dependencies = [
 
 [[package]]
 name = "lk-server"
-version = "0.1.0"
+version = "1.13.5"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "bytes",

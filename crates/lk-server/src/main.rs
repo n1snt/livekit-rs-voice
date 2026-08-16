@@ -131,6 +131,9 @@ async fn run_server(server: Arc<Server>) -> Result<(), Box<dyn std::error::Error
             .with_graceful_shutdown(shutdown_signal())
             .await?;
     }
+    // Remove this node from the cluster registry so its rooms can be reclaimed
+    // immediately by other nodes (rather than after the heartbeat TTL).
+    server.cluster.deregister().await;
     Ok(())
 }
 

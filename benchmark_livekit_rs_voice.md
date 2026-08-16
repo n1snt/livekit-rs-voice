@@ -5,9 +5,9 @@ A detailed performance comparison of the Rust voice-only LiveKit server rewrite
 (`livekit/livekit-server`), measured on the same host.
 
 **Summary:** for the signaling-heavy voice workload this project runs, the Rust
-server is **~7–10× faster** for join/leave throughput, **~6–11× lower** join
-latency, and **~5× lower** signaling RTT, while using **~2.6× less memory per
-stable WebRTC connection** and **5–23× more work per CPU-second** (i.e. it is
+server is **~7-10x faster** for join/leave throughput, **~6-11x lower** join
+latency, and **~5x lower** signaling RTT, while using **~2.6x less memory per
+stable WebRTC connection** and **5-23x more work per CPU-second** (i.e. it is
 both faster and more CPU-efficient). Serialization is in the tens-to-hundreds
 of nanoseconds range.
 
@@ -26,7 +26,7 @@ Memory + CPU headline numbers (same host, both servers loaded identically):
 
 Two complementary measurement layers:
 
-1. **Micro-benchmarks** (Rust `criterion`) — deterministic, in-process
+1. **Micro-benchmarks** (Rust `criterion`): deterministic, in-process
    measurements of the hot paths: protobuf / protojson serialization, JWT
    verification, room/participant/track operations, audio-level detection,
    config parsing, and fan-out broadcasts. `cargo bench -p lk-proto --bench
@@ -35,7 +35,7 @@ Two complementary measurement layers:
    confidence interval).
 
 2. **Load tests** (the `load_test` binary, `cargo run -p lk-server --bin
-   load_test --release`) — real WebSocket clients driven through the exact same
+   load_test --release`): real WebSocket clients driven through the exact same
    wire protocol against each server. Three scenarios:
    - **Join latency**: 200 clients connect concurrently (20 rooms); the metric
      is time from TCP connect to the `JoinResponse` frame.
@@ -108,7 +108,7 @@ codecs) round-trips in well under 3 µs end-to-end. A single data packet
 Notes:
 
 - Per-packet audio-level observation (used for active-speaker detection) is
-  ~56 ns — essentially free at audio rates (50 packets/s/track).
+  ~56 ns, essentially free at audio rates (50 packets/s/track).
 - Fan-out of a data packet to 50 participants costs ~3 µs, i.e. ~63 ns per
   recipient.
 - These are single-threaded numbers; the server runs multi-threaded
@@ -118,7 +118,7 @@ Notes:
 
 ## 3. Load tests (signaling)
 
-### 3.1 Concurrent join latency — 200 clients, 20 rooms
+### 3.1 Concurrent join latency: 200 clients, 20 rooms
 
 Time from TCP connect to receiving the `JoinResponse`.
 
@@ -129,9 +129,9 @@ Time from TCP connect to receiving the `JoinResponse`.
 | p99 | **36.4 ms** | 341.4 ms | **9.4×** |
 | max | **36.4 ms** | 349.7 ms | **9.6×** |
 | avg | **16.3 ms** | 118.7 ms | **7.3×** |
-| failures | 0 / 200 | 0 / 200 | — |
+| failures | 0 / 200 | 0 / 200 | n/a |
 
-### 3.2 Signal RTT + throughput — 200 stable connections, 8 s
+### 3.2 Signal RTT + throughput: 200 stable connections, 8 s
 
 `PingReq → PongResp` round trips, measured locally in microseconds.
 
@@ -145,10 +145,10 @@ Time from TCP connect to receiving the `JoinResponse`.
 | pong rate (aggregate) | **142.7 k/s** | 26.3 k/s | **5.4×** |
 
 > The ping path is the per-connection request/response loop that also carries
-> ICE candidates, subscription updates and room metadata — it is the signalling
+> ICE candidates, subscription updates and room metadata. It is the signalling
 > hot path for a voice call.
 
-### 3.3 Join/leave throughput — 200 clients, 8 s
+### 3.3 Join/leave throughput: 200 clients, 8 s
 
 | Metric | Rust | Go | Speedup |
 |---|---|---|---|
@@ -165,10 +165,10 @@ cost; the Rust server does everything in-process.
 
 ### 4.1 Methodology
 
-- **Rust server** (host process): sampled with `ps` — RSS and cumulative CPU
+- **Rust server** (host process): sampled with `ps` for RSS and cumulative CPU
   time (`time=`); CPU rate = Δ(cumulative CPU) / Δ(wall clock).
 - **Go server** (Docker container, cgroup v2): sampled via
-  `/sys/fs/cgroup/{memory.stat,memory.current,cpu.stat}` — `anon` memory
+  `/sys/fs/cgroup/{memory.stat,memory.current,cpu.stat}` for `anon` memory
   (heap, excludes page cache) and `usage_usec` (cumulative CPU); CPU rate =
   Δ(usage) / Δ(wall clock).
 - Both servers were loaded **identically and simultaneously** (same
@@ -184,12 +184,12 @@ cost; the Rust server does everything in-process.
 | | Rust | Go |
 |---|---|---|
 | Memory | **~5 MB** (RSS) | ~15 MB (anon), ~22 MB mem.current |
-| CPU | **~0%** | ~1.2–1.4% (Go runtime background activity) |
+| CPU | **~0%** | ~1.2-1.4% (Go runtime background activity) |
 
 The Rust server's idle footprint is **~3× smaller** than the Go server's, and
 it consumes no CPU at idle.
 
-### 4.3 Stable load — N WebSocket connections, ping/pong loop
+### 4.3 Stable load: N WebSocket connections, ping/pong loop
 
 Each connection holds a subscriber peer connection (3 SCTP data channels) and
 runs a ping/pong signalling loop; the load generator saturates each server with
@@ -213,11 +213,11 @@ the same traffic.
 At 50 connections: Rust **65 k pongs/CPU-s**, Go **10.5 k pongs/CPU-s**
 (≈6× more efficient).
 
-So under identical signalling load the Rust server not only completes ~4.6×
-more round-trips, it does so **using less total CPU** — roughly
-**7–8× more work per CPU-second**.
+So under identical signalling load the Rust server not only completes ~4.6x
+more round-trips, it does so **using less total CPU**, roughly
+**7-8x more work per CPU-second**.
 
-### 4.4 Join/leave churn — 50 clients, 30 s (throughput scenario)
+### 4.4 Join/leave churn: 50 clients, 30 s (throughput scenario)
 
 Connection creation/teardown is the CPU-and-allocation-heavy path (ICE, DTLS,
 SCTP setup/teardown per join).
@@ -231,7 +231,7 @@ SCTP setup/teardown per join).
 | Memory after churn (peak) | ~1.7 GB | ~2.3 GB | ~1.4× less |
 
 The Go server spends **3.8 cores** on churn to move **6.9× fewer** joins than
-the Rust server does on **1.1 cores** — the per-join cost (mostly its Redis
+the Rust server does on **1.1 cores**. The per-join cost (mostly its Redis
 relay + room allocation) is ~23× higher.
 
 ### 4.5 Post-load settle (idle after churn)
@@ -243,13 +243,13 @@ relay + room allocation) is ~23× higher.
 
 **Interpretation.** Rapid WebRTC connection churn is allocation-heavy in both
 servers and both plateau at a multi-GB working set; neither returns to baseline
-immediately. The behavioural difference is that Go's GC will eventually return
-freed heap to the OS (slowly), whereas the Rust server's system allocator
-retains it, so its RSS floor stays elevated after a churn spike. For a telephony
-workload — calls last minutes, not bursts of connect/disconnect — the
-steady-state numbers (section 4.3) are the ones that matter, and there the Rust
-server is markedly leaner. If OS-return behaviour is ever required, a release
-allocator (jemalloc/mimalloc) or periodic `malloc_trim` restores it.
+immediately. The behavioural difference is that Go's GC eventually returns freed
+heap to the OS (slowly), while the Rust server's system allocator retains it, so
+its RSS floor stays elevated after a churn spike. For a telephony workload (calls
+last minutes, not bursts of connect/disconnect), the steady-state numbers
+(section 4.3) are the ones that matter, and there the Rust server is markedly
+leaner. If OS-return behaviour is ever required, a release allocator
+(jemalloc/mimalloc) or periodic `malloc_trim` restores it.
 
 ### 4.6 Summary
 
@@ -309,12 +309,12 @@ CPU cost is negligible.
   transcodes audio.
 - Under pathological connect/disconnect churn both servers grow to a multi-GB
   working set (CPU churn is the cost driver, not memory); the Rust server keeps
-  the memory (malloc retention) while Go's GC returns some of it — neither
+  the memory (malloc retention) while Go's GC returns some of it. Neither
   returns to baseline immediately.
 
 **CPU efficiency is the headline.** Because both servers were driven with
 self-saturating identical load, the work-per-CPU-second figures are load-
-independent: **5–23× more work per CPU-second** (pongs and joins respectively).
+independent: **5-23x more work per CPU-second** (pongs and joins respectively).
 A single-node voice deployment can serve more concurrent calls per core on the
 Rust server than on the multi-node-capable Go server.
 
@@ -323,7 +323,7 @@ Rust server than on the multi-node-capable Go server.
 - The Go server is **v1.11.0 in Docker** with a Redis relay and full
   multi-node capability; the Rust server is **single-node** and voice-only
   (no video). A fair "feature-for-feature" comparison is not the point of this
-  project — the point is that the exact API surface this project depends on can
+  project; the point is that the exact API surface this project depends on can
   be served with materially better latency and throughput.
 - Loopback networking keeps network jitter out of the picture; real WAN
   deployments would add a floor that shrinks the relative difference.
@@ -341,19 +341,15 @@ cargo bench -p lk-server --bench core
 cargo build --release -p lk-server --bin livekit-voice --bin load_test
 
 # Rust server (single-node)
-./target/release/livekit-voice --config /tmp/lk-test.yaml &
+./target/release/livekit-voice --config /tmp/lk-test.yaml
 
-# Go server (the reference, in Docker):
+# Go server (the reference, in Docker)
 # docker run --rm -p 7880:7880 -p 7881:7881/udp -p 7882:7882 \
 #   -v $PWD/livekit.yaml:/etc/livekit.yaml livekit/livekit-server --config /etc/livekit.yaml
 
-# Compare (point --key/--secret at the keys configured for each server)
-./target/release/load_test --target ws://127.0.0.1:7990 \
-    --key devkey --secret secret --clients 200 --rooms 20 --duration 8
-./target/release/load_test --target ws://127.0.0.1:7880 \
-    --key devkey \
-    --secret secret \
-    --clients 200 --rooms 20 --duration 8
+# Point --key/--secret at the keys configured for each server
+./target/release/load_test --target ws://127.0.0.1:7990 --key devkey --secret secret --clients 200 --rooms 20 --duration 8
+./target/release/load_test --target ws://127.0.0.1:7880 --key devkey --secret secret --clients 200 --rooms 20 --duration 8
 ```
 
 `load_test` supports `--scenario all|join|rtt|throughput` to run individual

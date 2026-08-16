@@ -64,6 +64,11 @@ fn room_for_bench() -> Arc<Room> {
         lk_server::webhook::WebhookNotifier::disabled(),
         Arc::new(lk_server::metrics::Metrics::default()),
         Arc::new(lk_server::agent::AgentManager::new()),
+        lk_server::cluster::Cluster::new_with_bus(
+            Arc::new(lk_server::cluster::MemoryBus::default()),
+            "bench",
+            false,
+        ),
     ));
     Room::new("bench-room".to_string(), Arc::downgrade(&ctx))
 }

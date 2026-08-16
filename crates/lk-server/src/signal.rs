@@ -25,7 +25,8 @@ pub const PING_INTERVAL_SECS: i32 = 5;
 pub const PING_TIMEOUT_SECS: i32 = 15;
 
 /// Session parameters extracted from the HTTP request / join request.
-#[derive(Debug, Clone, Default)]
+/// Serialized (JSON) when relaying a join to another cluster node.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionParams {
     pub reconnect: bool,
     pub participant_sid: String,
@@ -475,13 +476,6 @@ pub async fn end_participant(participant: &Arc<Participant>, reason: lk::Disconn
 // WebSocket transport
 // ---------------------------------------------------------------------------
 
-/// Detects the message mode: protobuf-binary (default) or JSON (text frames).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WireMode {
-    Binary,
-    Json,
-}
-
 /// Everything that must be delivered in-order right after the websocket is
 /// upgraded, before the reader loop starts.
 pub struct SignalPrelude {
@@ -493,46 +487,191 @@ pub struct SignalPrelude {
     pub launch_agents: Vec<crate::auth::RoomAgentDispatch>,
 }
 
-/// Runs the full signaling session over a websocket. Sends the `SignalPrelude`
-/// (join response, then any publisher offer answer / track acknowledgements),
-/// launches room-level agent jobs, negotiates the subscriber connection, and
-/// then loops over incoming requests.
+/// The read half of a signaling transport. Implemented over a websocket
+/// (`WsIoReader`) or the Redis relay (`RelayIoReader` in `cluster.rs`).
+#[async_trait::async_trait]
+pub trait SignalIoReader: Send {
+    async fn next_request(&mut self) -> Option<lk::SignalRequest>;
+}
+
+/// The write half of a signaling transport.
+#[async_trait::async_trait]
+pub trait SignalIoWriter: Send {
+    async fn send(&mut self, resp: &lk::SignalResponse) -> bool;
+    async fn close(&mut self);
+}
+
+/// A signaling transport with independent read and write halves, so reads (which
+/// may block waiting for the next frame) never stall writes (responses, offers,
+/// broadcasts).
+pub struct SignalIo {
+    reader: tokio::sync::Mutex<Box<dyn SignalIoReader>>,
+    writer: tokio::sync::Mutex<Box<dyn SignalIoWriter>>,
+}
+
+impl SignalIo {
+    pub fn new(reader: Box<dyn SignalIoReader>, writer: Box<dyn SignalIoWriter>) -> Self {
+        SignalIo {
+            reader: tokio::sync::Mutex::new(reader),
+            writer: tokio::sync::Mutex::new(writer),
+        }
+    }
+
+    pub async fn next_request(&self) -> Option<lk::SignalRequest> {
+        self.reader.lock().await.next_request().await
+    }
+
+    pub async fn send(&self, resp: &lk::SignalResponse) -> bool {
+        self.writer.lock().await.send(resp).await
+    }
+
+    pub async fn close(&self) {
+        self.writer.lock().await.close().await;
+    }
+}
+
+/// Encodes a response for the websocket wire format (binary or JSON).
+pub fn ws_encode(resp: &lk::SignalResponse, json: bool) -> Message {
+    if json {
+        match serde_json::to_string(resp) {
+            Ok(text) => Message::Text(text.into()),
+            Err(_) => Message::Binary(resp.encode_to_vec().into()),
+        }
+    } else {
+        Message::Binary(resp.encode_to_vec().into())
+    }
+}
+
+/// Decodes a websocket frame into a `SignalRequest`, updating the wire mode.
+/// Returns `None` for non-data frames or decode failures.
+pub fn ws_decode(msg: Message, json: &mut bool) -> Option<lk::SignalRequest> {
+    match msg {
+        Message::Binary(bytes) => {
+            *json = false;
+            lk::SignalRequest::decode(bytes.as_ref()).ok()
+        }
+        Message::Text(text) => {
+            *json = true;
+            serde_json::from_str::<lk::SignalRequest>(&text).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Maps the token's `kind` claim to the participant kind used at join time.
+pub fn participant_kind_from_token(token: &auth::VerifiedToken) -> ParticipantKind {
+    match token.kind.to_uppercase().as_str() {
+        "AGENT" => ParticipantKind::Agent,
+        "EGRESS" => ParticipantKind::Egress,
+        "SIP" => ParticipantKind::Sip,
+        "INGRESS" => ParticipantKind::Ingress,
+        _ => ParticipantKind::Standard,
+    }
+}
+
+struct WsIoReader {
+    stream: futures_util::stream::SplitStream<WebSocket>,
+    mode: Arc<std::sync::Mutex<bool>>, // false = binary, true = json
+}
+
+#[async_trait::async_trait]
+impl SignalIoReader for WsIoReader {
+    async fn next_request(&mut self) -> Option<lk::SignalRequest> {
+        loop {
+            let frame = tokio::time::timeout(
+                std::time::Duration::from_secs(PING_TIMEOUT_SECS as u64),
+                self.stream.next(),
+            )
+            .await
+            .ok()??;
+            let frame = frame.ok()?;
+            match frame {
+                Message::Binary(bytes) => {
+                    *self.mode.lock().unwrap() = false;
+                    return lk::SignalRequest::decode(bytes.as_ref()).ok();
+                }
+                Message::Text(text) => {
+                    *self.mode.lock().unwrap() = true;
+                    return serde_json::from_str::<lk::SignalRequest>(&text).ok();
+                }
+                Message::Close(_) => return None,
+                _ => continue, // ping/pong are answered by tungstenite
+            }
+        }
+    }
+}
+
+struct WsIoWriter {
+    sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    mode: Arc<std::sync::Mutex<bool>>,
+}
+
+#[async_trait::async_trait]
+impl SignalIoWriter for WsIoWriter {
+    async fn send(&mut self, resp: &lk::SignalResponse) -> bool {
+        let json = *self.mode.lock().unwrap();
+        self.sink.send(ws_encode(resp, json)).await.is_ok()
+    }
+
+    async fn close(&mut self) {
+        let _ = self
+            .sink
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1000,
+                reason: "".into(),
+            })))
+            .await;
+    }
+}
+
+/// Builds a websocket-backed signal transport.
+pub fn ws_io(socket: WebSocket) -> SignalIo {
+    let (sink, stream) = socket.split();
+    let mode = Arc::new(std::sync::Mutex::new(false));
+    SignalIo::new(
+        Box::new(WsIoReader {
+            stream,
+            mode: mode.clone(),
+        }),
+        Box::new(WsIoWriter { sink, mode }),
+    )
+}
+
+/// Runs the full signaling session over a `SignalIo`. Sends the
+/// `SignalPrelude` (join response, then any publisher offer answer / track
+/// acknowledgements), launches room-level agent jobs, negotiates the subscriber
+/// connection, and then loops over incoming requests.
 pub async fn run_signal_session(
-    socket: WebSocket,
+    io: SignalIo,
     participant: Arc<Participant>,
     room: Arc<Room>,
     prelude: SignalPrelude,
 ) {
-    let (mut sink, mut stream) = socket.split();
+    let io = Arc::new(io);
     let (tx, mut rx) =
         mpsc::channel::<lk::SignalResponse>(crate::participant::SIGNAL_CHANNEL_CAPACITY);
 
     // Hand the outbound channel to the participant.
     let _old = participant.set_signal_sink(tx);
-    let mode = Arc::new(std::sync::Mutex::new(WireMode::Binary));
 
-    // Writer task (owns the sink; tungstenite auto-responds to WS pings).
-    let writer_mode = mode.clone();
+    // Writer task: the join response is written first (so it is always the
+    // first frame the client receives), then the participant's outbound
+    // channel is drained.
+    let writer_io = io.clone();
+    let join = prelude.join.clone();
     let sink_task = tokio::spawn(async move {
+        if !writer_io.send(&join).await {
+            return;
+        }
         while let Some(resp) = rx.recv().await {
-            let use_json = *writer_mode.lock().unwrap() == WireMode::Json;
-            let frame = if use_json {
-                match serde_json::to_string(&resp) {
-                    Ok(json) => Message::Text(json.into()),
-                    Err(_) => continue,
-                }
-            } else {
-                Message::Binary(resp.encode_to_vec().into())
-            };
-            if sink.send(frame).await.is_err() {
+            if !writer_io.send(&resp).await {
                 break;
             }
         }
     });
 
-    // 1. Join response, then post-join responses. Tracks are registered before
-    //    the publisher offer so incoming RTP can be matched to them.
-    let _ = participant.send(prelude.join).await;
+    // 1. Post-join responses. Tracks are registered before the publisher offer
+    //    so incoming RTP can be matched to them.
     for at in prelude.add_tracks {
         handle_participant_request(
             &participant,
@@ -602,65 +741,57 @@ pub async fn run_signal_session(
     }
     media::request_subscriber_negotiation(&participant);
 
-    // 4. Reader loop (with a read deadline; the client pings every ping_interval).
-    let read_timeout = std::time::Duration::from_secs(PING_TIMEOUT_SECS as u64);
-    let mut close_reason = lk::DisconnectReason::SignalClose;
-    loop {
-        let frame = match tokio::time::timeout(read_timeout, stream.next()).await {
-            Ok(Some(frame)) => frame,
-            Ok(None) => break,
-            Err(_) => {
-                close_reason = lk::DisconnectReason::ConnectionTimeout;
-                break;
-            }
-        };
-        let frame = match frame {
-            Ok(f) => f,
-            Err(_) => break,
-        };
-        match frame {
-            Message::Binary(bytes) => {
-                *mode.lock().unwrap() = WireMode::Binary;
-                match lk::SignalRequest::decode(bytes.as_ref()) {
-                    Ok(req) => {
-                        handle_participant_request(&participant, req).await;
-                        if participant.state() == ParticipantState::Disconnected {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(sid = %participant.sid, "decode signal request: {e}");
-                    }
-                }
-            }
-            Message::Text(text) => {
-                *mode.lock().unwrap() = WireMode::Json;
-                match serde_json::from_str::<lk::SignalRequest>(&text) {
-                    Ok(req) => {
-                        handle_participant_request(&participant, req).await;
-                        if participant.state() == ParticipantState::Disconnected {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(sid = %participant.sid, "decode json request: {e}");
-                    }
-                }
-            }
-            Message::Close(_) => {
-                close_reason = lk::DisconnectReason::ClientInitiated;
-                break;
-            }
-            _ => {}
+    // 4. Reader loop. The transport enforces its own deadline (websocket) or
+    //    blocks until closed (relay); both surface as `None`.
+    while let Some(req) = io.next_request().await {
+        handle_participant_request(&participant, req).await;
+        if participant.state() == ParticipantState::Disconnected {
+            break;
         }
     }
 
-    drop(stream);
-    // Terminate the participant.
+    // Signal the transport we are done, then terminate the participant.
+    io.close().await;
     if participant.state() != ParticipantState::Disconnected {
-        end_participant(&participant, close_reason).await;
+        end_participant(&participant, lk::DisconnectReason::SignalClose).await;
     }
     let _ = sink_task.await;
+}
+
+/// Joins a room and runs the session core over the given transport. Shared by
+/// the local websocket path and the remote relay path (`cluster.rs`).
+pub async fn run_session_with_io(
+    io: SignalIo,
+    server: &Arc<Server>,
+    token: auth::VerifiedToken,
+    params: SessionParams,
+    kind: ParticipantKind,
+) -> Result<(), String> {
+    let room_name = token.video.room.clone();
+    let (room, participant, launch_agents) = match join_room(server, &token, &params, kind).await {
+        Ok(x) => x,
+        Err(e) => {
+            // The room registry claim may have been made for this node but the
+            // room never came to exist here; release it so future joins can
+            // reclaim the room elsewhere.
+            if server.get_room(&room_name).is_none() {
+                server.cluster.release_room(&room_name).await;
+            }
+            return Err(e);
+        }
+    };
+    let join_response = build_join_response(&room, &participant, server);
+    let prelude = SignalPrelude {
+        join: lk::SignalResponse {
+            message: Some(lk::signal_response::Message::Join(join_response)),
+        },
+        publisher_offer: params.publisher_offer.clone(),
+        add_tracks: params.add_track_requests.clone(),
+        sync_state: params.sync_state.clone(),
+        launch_agents,
+    };
+    run_signal_session(io, participant, room, prelude).await;
+    Ok(())
 }
 
 /// Closes the signal connection (used by RoomService.RemoveParticipant and

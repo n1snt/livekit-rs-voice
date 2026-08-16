@@ -19,6 +19,7 @@ pub struct RoomContext {
     pub webhook: WebhookNotifier,
     pub metrics: Arc<Metrics>,
     pub agent: Arc<crate::agent::AgentManager>,
+    pub cluster: Arc<crate::cluster::Cluster>,
     /// Last broadcast speaker-set per room (used to avoid redundant updates).
     pub speaker_states: std::sync::Mutex<HashMap<String, String>>,
 }
@@ -30,6 +31,7 @@ impl RoomContext {
         webhook: WebhookNotifier,
         metrics: Arc<Metrics>,
         agent: Arc<crate::agent::AgentManager>,
+        cluster: Arc<crate::cluster::Cluster>,
     ) -> Self {
         RoomContext {
             config,
@@ -37,6 +39,7 @@ impl RoomContext {
             webhook,
             metrics,
             agent,
+            cluster,
             speaker_states: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -49,6 +52,11 @@ impl RoomContext {
             WebhookNotifier::disabled(),
             Arc::new(Metrics::default()),
             Arc::new(crate::agent::AgentManager::new()),
+            crate::cluster::Cluster::new_with_bus(
+                Arc::new(crate::cluster::MemoryBus::default()),
+                "test",
+                false,
+            ),
         ))
     }
 }
@@ -354,6 +362,7 @@ impl Room {
         let ctx = self.context();
         if let Some(ctx) = &ctx {
             ctx.agent.terminate_room_jobs(&self.name).await;
+            ctx.cluster.release_room(&self.name).await;
         }
 
         let participants = self.participants();

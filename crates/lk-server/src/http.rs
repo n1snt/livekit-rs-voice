@@ -15,7 +15,6 @@ use prost::Message as _;
 
 use crate::agent;
 use crate::auth::{self, VerifiedToken};
-use crate::core::ParticipantKind;
 use crate::server::Server;
 use crate::signal::{self, SessionParams};
 
@@ -297,10 +296,16 @@ async fn rtc_ws_impl(
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
+    let raw_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().trim_start_matches("Bearer ").to_string())
+        .or_else(|| params.get("access_token").cloned())
+        .unwrap_or_default();
 
     ws.max_message_size(max_signal_message_size(&server))
         .on_upgrade(move |socket| async move {
-            if let Err(e) = run_rtc_session(socket, server, token, session).await {
+            if let Err(e) = run_rtc_session(socket, server, token, raw_token, session).await {
                 tracing::warn!("rtc session ended: {e}");
             }
         })
@@ -382,35 +387,21 @@ async fn run_rtc_session(
     socket: WebSocket,
     server: Arc<Server>,
     token: VerifiedToken,
+    raw_token: String,
     params: SessionParams,
 ) -> Result<(), String> {
-    let kind = match token.kind.to_uppercase().as_str() {
-        "AGENT" => ParticipantKind::Agent,
-        "EGRESS" => ParticipantKind::Egress,
-        "SIP" => ParticipantKind::Sip,
-        "INGRESS" => ParticipantKind::Ingress,
-        _ => ParticipantKind::Standard,
-    };
-    let (room, participant, launch_agents) =
-        signal::join_room(&server, &token, &params, kind).await?;
+    let kind = signal::participant_kind_from_token(&token);
 
-    let join_response = signal::build_join_response(&room, &participant, &server);
-
-    let prelude = signal::SignalPrelude {
-        join: join_response_msg(join_response),
-        publisher_offer: params.publisher_offer.clone(),
-        add_tracks: params.add_track_requests.clone(),
-        sync_state: params.sync_state.clone(),
-        launch_agents,
-    };
-
-    signal::run_signal_session(socket, participant, room, prelude).await;
-    Ok(())
-}
-
-fn join_response_msg(resp: lk::JoinResponse) -> lk::SignalResponse {
-    lk::SignalResponse {
-        message: Some(lk::signal_response::Message::Join(resp)),
+    // Route the room: run locally, or relay to the hosting node.
+    match server.cluster.route_room(&token.video.room).await {
+        crate::cluster::Routing::Local => {
+            signal::run_session_with_io(signal::ws_io(socket), &server, token, params, kind).await
+        }
+        crate::cluster::Routing::Remote(target_node) => {
+            crate::cluster::run_relay_client(socket, &server, &raw_token, params, &target_node)
+                .await;
+            Ok(())
+        }
     }
 }
 

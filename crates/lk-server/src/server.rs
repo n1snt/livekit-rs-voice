@@ -22,29 +22,39 @@ pub struct Server {
     pub node_id: String,
     pub start_time: Instant,
     pub store: Arc<crate::redis_store::Store>,
+    pub cluster: Arc<crate::cluster::Cluster>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Arc<Self> {
+        let node_id = if config.node_id.is_empty() {
+            crate::core::node_id(None)
+        } else {
+            config.node_id.clone()
+        };
+        let cluster = crate::cluster::Cluster::new(&config, &node_id);
+        Server::with_cluster(config, cluster)
+    }
+
+    /// Builds a server around an explicitly provided cluster (used by the
+    /// multi-node integration tests to share a cluster bus between nodes).
+    pub fn with_cluster(config: Config, cluster: Arc<crate::cluster::Cluster>) -> Arc<Self> {
         let config = Arc::new(config);
         let keys = KeyProvider::new(&config);
         let rtc = Arc::new(RtcEngine::new());
         let webhook = WebhookNotifier::from_config(&config);
         let metrics = Arc::new(Metrics::default());
         let agent = Arc::new(AgentManager::new_with_keys(keys.clone()));
+        let node_id = cluster.node_id.clone();
         let context = Arc::new(RoomContext::new(
             config.clone(),
             rtc,
             webhook,
             metrics,
             agent,
+            cluster.clone(),
         ));
-        let node_id = if config.node_id.is_empty() {
-            crate::core::node_id(None)
-        } else {
-            config.node_id.clone()
-        };
         let store = crate::redis_store::Store::from_config(&config);
         Arc::new(Server {
             config,
@@ -53,6 +63,7 @@ impl Server {
             node_id,
             start_time: Instant::now(),
             store,
+            cluster,
             rooms: Mutex::new(HashMap::new()),
         })
     }
@@ -127,6 +138,14 @@ impl Server {
     /// Background worker: room empty-timeout enforcement and active-speaker
     /// broadcasts.
     pub fn start_background_tasks(self: &Arc<Self>) {
+        self.cluster.start_heartbeat();
+        if self.cluster.is_enabled() {
+            let server = self.clone();
+            let cluster = self.cluster.clone();
+            tokio::spawn(async move {
+                cluster.run_relay_consumer(&server).await;
+            });
+        }
         let server = self.clone();
         tokio::spawn(async move {
             let mut room_ticker = tokio::time::interval(Duration::from_secs(1));

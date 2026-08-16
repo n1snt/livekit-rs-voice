@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.13.5"
 edition = "2021"
 rust-version = "1.81"
 license = "Apache-2.0"
@@ -14,6 +14,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 lk-proto = { path = "crates/lk-proto" }
 criterion = { version = "0.5", features = ["async_tokio"] }
+async-trait = "0.1"
 
 # --- protocol serialization ---
 prost = "0.13"
