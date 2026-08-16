@@ -20,7 +20,6 @@ pub struct RoomContext {
     pub metrics: Arc<Metrics>,
     pub agent: Arc<crate::agent::AgentManager>,
     pub cluster: Arc<crate::cluster::Cluster>,
-    /// Last broadcast speaker-set per room (used to avoid redundant updates).
     pub speaker_states: std::sync::Mutex<HashMap<String, String>>,
 }
 

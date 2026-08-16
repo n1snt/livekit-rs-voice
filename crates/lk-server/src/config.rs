@@ -16,9 +16,7 @@ pub const DEFAULT_NODE_ID_PREFIX: &str = "LX";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// HTTP/WS signaling port.
     pub port: Option<u16>,
-    /// Bind addresses for the HTTP listener.
     pub bind_addresses: Vec<String>,
     pub rtc: RTCConfig,
     pub redis: RedisConfig,
@@ -87,9 +85,6 @@ pub struct RedisConfig {
     pub db: i64,
     pub use_tls: bool,
     pub max_retries: i32,
-    /// Enable multi-node clustering (node registry + signaling relay over
-    /// Redis). Requires `address`. When false, this node runs standalone even
-    /// if Redis is configured (Redis is still used for SIP/egress interop).
     pub cluster: bool,
 }
 
