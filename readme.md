@@ -1,9 +1,9 @@
 # livekit-rs-voice
 
-A voice-only LiveKit server in Rust. It is a drop-in replacement for the audio
-path of [livekit-server](https://github.com/livekit/livekit): it speaks the
-same LiveKit wire protocol, so existing LiveKit clients, `livekit-agents`, and
-the `livekit/sip` + `livekit/egress` containers connect and work unchanged.
+A minimal, voice-only LiveKit server. A drop-in replacement in Rust for the
+audio path of [livekit-server](https://github.com/livekit/livekit). It speaks
+the same LiveKit wire protocol, so existing LiveKit clients, `livekit-agents`,
+and the `livekit/sip` + `livekit/egress` containers connect and work unchanged.
 
 Everything not listed under [Differences from LiveKit](#differences-from-livekit)
 behaves like the reference `livekit-server`; configure and use it the same way
@@ -25,7 +25,7 @@ Images are published to GHCR on every `v*` tag.
 
 ## Differences from LiveKit
 
-- **Audio only** — video tracks are rejected.
+- **Audio only** (video tracks are rejected).
 - **Multi-node over Redis** (`redis.cluster: true`); does not interoperate with Go `livekit-server` nodes.
 - **SIP & Egress** interoperate with the `livekit/sip` and `livekit/egress` containers over Redis (psrpc).
 - **Webhooks** signed with `X-Livekit-Signature: hex(HMAC-SHA256(...))`.
