@@ -1447,6 +1447,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lk-psrpc"
+version = "1.13.5"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "lk-proto",
+ "prost 0.13.5",
+ "rand 0.8.7",
+ "redis",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lk-server"
 version = "1.13.5"
 dependencies = [
@@ -1463,6 +1479,7 @@ dependencies = [
  "ipnet",
  "jsonwebtoken",
  "lk-proto",
+ "lk-psrpc",
  "md5",
  "prometheus",
  "prost 0.13.5",

@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "internal.proto",
         "rpc/sip.proto",
         "rpc/io.proto",
+        "rpc/egress.proto",
     ];
     let files: Vec<String> = files
         .iter()

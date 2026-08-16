@@ -1,0 +1,23 @@
+[package]
+name = "lk-psrpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "livekit psrpc v0.7 wire protocol (Redis PubSub) shared by livekit-voice and livekit-egress."
+
+[dependencies]
+lk-proto = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+
+tokio = { workspace = true }
+futures-util = { workspace = true }
+
+redis = { workspace = true }
+
+tracing = { workspace = true }
+
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }

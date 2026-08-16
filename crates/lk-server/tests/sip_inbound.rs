@@ -13,7 +13,7 @@ use lk_proto::rpc;
 use prost::Message as _;
 
 use lk_server::config::Config;
-use lk_server::psrpc::{MemoryBus, SipInternalClient};
+use lk_server::psrpc::{MemoryBus, PsrpcClient};
 use lk_server::server::Server;
 
 fn test_config() -> Config {
@@ -31,11 +31,11 @@ fn uri(user: &str) -> lk::SipUri {
     }
 }
 
-async fn start_server_with_io() -> (Arc<Server>, Arc<SipInternalClient>) {
+async fn start_server_with_io() -> (Arc<Server>, Arc<PsrpcClient>) {
     let server = Server::new(test_config());
     let bus = MemoryBus::new();
     server.start_sip_io_with(bus.clone()).await.unwrap();
-    let client = SipInternalClient::new_with_service(bus, "IOInfoSIP", Duration::from_secs(2))
+    let client = PsrpcClient::new_with_timeout(bus, "IOInfoSIP", Duration::from_secs(2))
         .await
         .unwrap();
     (server, client)
@@ -86,7 +86,7 @@ async fn inbound_trunk_auth_and_dispatch_round_trip() {
         ..Default::default()
     };
     let raw = client
-        .request("GetSIPTrunkAuthentication", &auth_req)
+        .request("GetSIPTrunkAuthentication", "", &auth_req)
         .await
         .unwrap();
     let auth = rpc::GetSipTrunkAuthenticationResponse::decode(raw.as_slice()).unwrap();
@@ -109,7 +109,7 @@ async fn inbound_trunk_auth_and_dispatch_round_trip() {
         ..Default::default()
     };
     let raw = client
-        .request("EvaluateSIPDispatchRules", &dispatch_req)
+        .request("EvaluateSIPDispatchRules", "", &dispatch_req)
         .await
         .unwrap();
     let dispatch = rpc::EvaluateSipDispatchRulesResponse::decode(raw.as_slice()).unwrap();
@@ -145,7 +145,7 @@ async fn unknown_trunk_is_empty_auth() {
         ..Default::default()
     };
     let raw = client
-        .request("GetSIPTrunkAuthentication", &auth_req)
+        .request("GetSIPTrunkAuthentication", "", &auth_req)
         .await
         .unwrap();
     let auth = rpc::GetSipTrunkAuthenticationResponse::decode(raw.as_slice()).unwrap();
@@ -179,7 +179,7 @@ async fn no_dispatch_rule_drops() {
         ..Default::default()
     };
     let raw = client
-        .request("EvaluateSIPDispatchRules", &dispatch_req)
+        .request("EvaluateSIPDispatchRules", "", &dispatch_req)
         .await
         .unwrap();
     let dispatch = rpc::EvaluateSipDispatchRulesResponse::decode(raw.as_slice()).unwrap();
@@ -195,11 +195,14 @@ async fn call_state_and_context_are_accepted() {
         call_info: Some(lk::SipCallInfo::default()),
         ..Default::default()
     };
-    let raw = client.request("UpdateSIPCallState", &state).await.unwrap();
+    let raw = client
+        .request("UpdateSIPCallState", "", &state)
+        .await
+        .unwrap();
     assert_eq!(raw, lk_proto::well_known::Empty {}.encode_to_vec());
 
     let ctx = rpc::RecordCallContextRequest {
         call_info: Some(lk::SipCallInfo::default()),
     };
-    client.request("RecordCallContext", &ctx).await.unwrap();
+    client.request("RecordCallContext", "", &ctx).await.unwrap();
 }

@@ -109,8 +109,10 @@ impl Server {
                 "outbound SIP requires redis (psrpc bus) and a livekit/sip bridge".to_string(),
             );
         }
-        self.sip_client_with(Arc::new(crate::psrpc::RedisBus::new(&self.config)))
-            .await
+        self.sip_client_with(Arc::new(crate::psrpc::RedisBus::new(
+            &crate::psrpc::redis_config(&self.config),
+        )))
+        .await
     }
 
     /// Builds (or returns the cached) psrpc client over the given bus. Tests
@@ -139,8 +141,10 @@ impl Server {
                 "inbound SIP requires redis (psrpc bus) and a livekit/sip bridge".to_string(),
             );
         }
-        self.start_sip_io_with(Arc::new(crate::psrpc::RedisBus::new(&self.config)))
-            .await
+        self.start_sip_io_with(Arc::new(crate::psrpc::RedisBus::new(
+            &crate::psrpc::redis_config(&self.config),
+        )))
+        .await
     }
 
     /// Starts the `IOInfoSIP` psrpc server over the given bus. Tests inject an

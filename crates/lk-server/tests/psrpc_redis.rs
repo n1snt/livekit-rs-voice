@@ -106,7 +106,7 @@ async fn redis_bus_round_trips_full_claim_flow() {
         return;
     };
     let config = config_with_redis(&addr);
-    let bus = Arc::new(RedisBus::new(&config));
+    let bus = Arc::new(RedisBus::new(&lk_server::psrpc::redis_config(&config)));
     let received = spawn_real_bridge(bus.clone()).await;
     let client = lk_server::psrpc::SipInternalClient::new(bus.clone())
         .await
@@ -141,7 +141,7 @@ async fn io_server_round_trips_over_real_redis() {
         return;
     };
     let config = config_with_redis(&addr);
-    let bus: Arc<RedisBus> = Arc::new(RedisBus::new(&config));
+    let bus: Arc<RedisBus> = Arc::new(RedisBus::new(&lk_server::psrpc::redis_config(&config)));
     let server = lk_server::server::Server::new(config);
     server
         .store
@@ -159,7 +159,7 @@ async fn io_server_round_trips_over_real_redis() {
         .await
         .expect("io server starts");
 
-    let client = lk_server::psrpc::SipInternalClient::new_with_service(
+    let client = lk_server::psrpc::PsrpcClient::new_with_timeout(
         bus,
         "IOInfoSIP",
         std::time::Duration::from_secs(5),
@@ -181,7 +181,7 @@ async fn io_server_round_trips_over_real_redis() {
         ..Default::default()
     };
     let raw = client
-        .request("GetSIPTrunkAuthentication", &auth_req)
+        .request("GetSIPTrunkAuthentication", "", &auth_req)
         .await
         .expect("auth over real redis");
     let auth = rpc::GetSipTrunkAuthenticationResponse::decode(raw.as_slice()).unwrap();

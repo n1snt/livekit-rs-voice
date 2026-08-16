@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/lk-proto",
+    "crates/lk-psrpc",
     "crates/lk-server",
 ]
 
