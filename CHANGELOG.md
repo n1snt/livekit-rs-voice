@@ -14,28 +14,6 @@ Versions mirror [livekit-server](https://github.com/livekit/livekit) releases:
 version to match whenever we pick up upstream protocol patches, so the version
 always reflects the LiveKit protocol level the server implements.
 
-## [Unreleased]
-
-### Added
-
-- TURN relay (RFC 8489/5766) with JoinResponse ICE server credentials.
-- Full SIP over the psrpc wire protocol (v0.7 Redis PubSub): outbound
-  `CreateSIPParticipant` / `TransferSIPParticipant` reach a real
-  `livekit/sip` container, and the embedded `IOInfoSIP` service serves
-  inbound calls (trunk authentication, dispatch-rule evaluation, call state).
-- `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules
-  through the Twirp API.
-- Drop-in Prometheus metrics matching the reference `livekit-server` names,
-  labels, and histogram buckets: rooms, participants, connections, tracks,
-  session latency/duration, connection-quality score, RTP packets, RTCP
-  feedback (NACK/PLI/FIR), per-stream packet loss/out-of-order/jitter/RTT,
-  and forwarding latency (from RTCP sender reports). Existing LiveKit
-  Grafana dashboards work unchanged. See `crates/lk-server/src/metrics.rs`.
-
-### Fixed
-
-- Clustering (Redis) was still tracked as "planned"; it has shipped.
-
 ## [1.13.5] - 2026-08-16
 
 ### Added
@@ -51,10 +29,24 @@ always reflects the LiveKit protocol level the server implements.
 - Webhooks (`room_started`, `room_finished`, `participant_joined`,
   `participant_left`, `track_published`, `track_unpublished`) signed with
   `X-Livekit-Signature: hex(HMAC-SHA256(...))`.
-- Prometheus `/metrics` (incl. `livekit_room_total`) on a dedicated port.
+- Prometheus `/metrics` on a dedicated port.
 - Optional Redis store for SIP/egress container interop.
 - Benchmarks: criterion micro-benchmarks + `load_test` harness, and
   `benchmark_livekit_rs_voice.md` comparing against the Go server.
+- TURN relay (RFC 8489/5766) with JoinResponse ICE server credentials.
+- Full SIP over the psrpc wire protocol (v0.7 Redis PubSub): outbound
+  `CreateSIPParticipant` / `TransferSIPParticipant` reach a real
+  `livekit/sip` container, and the embedded `IOInfoSIP` service serves
+  inbound calls (trunk authentication, dispatch-rule evaluation, call state).
+- `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules
+  through the Twirp API.
+- Drop-in Prometheus metrics matching the reference `livekit-server` names,
+  labels, and histogram buckets: rooms, participants, connections, tracks,
+  session latency/duration, connection-quality score, RTP packets, RTCP
+  feedback (NACK/PLI/FIR), per-stream packet loss/out-of-order/jitter/RTT,
+  and forwarding latency (from RTCP sender reports). Existing LiveKit
+  Grafana dashboards work unchanged. See `crates/lk-server/src/metrics.rs`.
+- Multi-node clustering over Redis (`redis.cluster: true`).
 
 ### Fixed
 
