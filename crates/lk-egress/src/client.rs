@@ -223,37 +223,43 @@ pub async fn connect(
                     };
                     match resp.message {
                         Some(lk::signal_response::Message::Offer(offer)) => {
-                            let out_tx_ice = out_tx.clone();
-                            let audio_tx_track = audio_tx_inner.clone();
-                            let pc_arc = match client_pc(
-                                move |candidate| {
-                                    let _ = out_tx_ice.try_send(ws_trickle(candidate));
-                                },
-                                move |track| {
-                                    let audio_tx = audio_tx_track.clone();
-                                    let cid = track.stream_id();
-                                    tokio::spawn(async move {
-                                        let mut buf = vec![0u8; 4096];
-                                        while let Ok((pkt, _)) = track.read(&mut buf).await {
-                                            if audio_tx
-                                                .send(AudioPacket {
-                                                    track_cid: cid.clone(),
-                                                    payload: pkt.payload.to_vec(),
-                                                })
-                                                .await
-                                                .is_err()
-                                            {
-                                                break;
+                            // Create the subscriber PC once, then reuse it for
+                            // renegotiation offers (LiveKit adds tracks via
+                            // subsequent offers on the same peer connection).
+                            if pc.is_none() {
+                                let out_tx_ice = out_tx.clone();
+                                let audio_tx_track = audio_tx_inner.clone();
+                                match client_pc(
+                                    move |candidate| {
+                                        let _ = out_tx_ice.try_send(ws_trickle(candidate));
+                                    },
+                                    move |track| {
+                                        let audio_tx = audio_tx_track.clone();
+                                        let cid = track.stream_id();
+                                        tokio::spawn(async move {
+                                            let mut buf = vec![0u8; 4096];
+                                            while let Ok((pkt, _)) = track.read(&mut buf).await {
+                                                if audio_tx
+                                                    .send(AudioPacket {
+                                                        track_cid: cid.clone(),
+                                                        payload: pkt.payload.to_vec(),
+                                                    })
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    break;
+                                                }
                                             }
-                                        }
-                                    });
-                                },
-                            )
-                            .await
-                            {
-                                Ok(pc) => pc,
-                                Err(_) => break,
-                            };
+                                        });
+                                    },
+                                )
+                                .await
+                                {
+                                    Ok(pc_new) => pc = Some(pc_new),
+                                    Err(_) => break,
+                                }
+                            }
+                            let pc_arc = pc.clone().unwrap();
                             let mut sd = RTCSessionDescription::default();
                             sd.sdp_type = RTCSdpType::Offer;
                             sd.sdp = offer.sdp.clone();
@@ -269,7 +275,6 @@ pub async fn connect(
                                     },
                                 )),
                             }).await;
-                            pc = Some(pc_arc);
                         }
                         Some(lk::signal_response::Message::Trickle(t)) => {
                             if let Some(pc) = &pc {
