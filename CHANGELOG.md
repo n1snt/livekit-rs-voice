@@ -28,6 +28,7 @@ Versions mirror [livekit-server](https://github.com/livekit/livekit) releases: `
 - Drop-in Prometheus metrics matching the reference `livekit-server` names, labels, and histogram buckets: rooms, participants, connections, tracks, session latency/duration, connection-quality score, RTP packets, RTCP feedback (NACK/PLI/FIR), per-stream packet loss/out-of-order/jitter/RTT, and forwarding latency (from RTCP sender reports). Existing LiveKit Grafana dashboards work unchanged. See `crates/lk-server/src/metrics.rs`.
 - Multi-node clustering over Redis (`redis.cluster: true`).
 - `livekit-egress`: a voice-only recorder (WAV/MP3) hosted in this monorepo, dispatched over the psrpc bus and reporting state back via `IOInfo`.
+- `benchmark_livekit_rs_egress.md`: recorder footprint (0.7% CPU / 11 MB while recording, 67.6 MB image vs the Go egress's 4.76 GB).
 
 ### Fixed
 
