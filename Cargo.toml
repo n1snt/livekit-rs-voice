@@ -59,3 +59,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 flate2 = "1"
+
+# Smaller + faster release binaries (strip symbols, thin LTO).
+[profile.release]
+strip = true
+lto = "thin"

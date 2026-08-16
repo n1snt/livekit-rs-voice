@@ -26,11 +26,10 @@ RUN cargo build --release -p lk-server
 ###############################################################################
 # Runtime stage
 ###############################################################################
-FROM debian:bookworm-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Minimal glibc runtime (~35 MB vs ~108 MB for bookworm-slim); distroless
+# ships glibc + CA certs. The release binary is stripped via the Cargo
+# profile (strip = true, lto = "thin").
+FROM gcr.io/distroless/cc-debian12
 
 COPY --from=build /build/target/release/livekit-voice /usr/local/bin/livekit-voice
 
