@@ -13,6 +13,18 @@ pub mod google {
     }
 }
 
+pub mod internal {
+    #![allow(clippy::all)]
+    include!(concat!(env!("OUT_DIR"), "/internal.rs"));
+    include!(concat!(env!("OUT_DIR"), "/internal.serde.rs"));
+}
+
+pub mod rpc {
+    #![allow(clippy::all)]
+    include!(concat!(env!("OUT_DIR"), "/rpc.rs"));
+    include!(concat!(env!("OUT_DIR"), "/rpc.serde.rs"));
+}
+
 pub use google::protobuf as well_known;
 
 mod wkt_serde;

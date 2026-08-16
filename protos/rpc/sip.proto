@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+package rpc;
+
+option go_package = "github.com/livekit/protocol/rpc";
+
+// SIPInternal RPC payloads. Field numbers match livekit/protocol
+// (protobufs/rpc/sip.proto) so these serialize identically on the psrpc wire.
+// Service/method definitions, the psrpc custom options, and the logger field
+// annotations are omitted: the RPC client is implemented by hand in
+// lk-server's psrpc module.
+
+import "google/protobuf/duration.proto";
+import "livekit_models.proto";
+import "livekit_sip.proto";
+
+message InternalCreateSIPParticipantRequest {
+  // Used in Cloud only
+  string project_id = 18;
+
+  string sip_call_id = 13;
+  string sip_trunk_id = 19;
+
+  livekit.SIPRequestDest sip_request_uri = 35; // INVITE <uri>
+  livekit.SIPNamedDest   sip_from_header = 36; // From: "Name" <uri>
+  livekit.SIPNamedDest   sip_to_header   = 37; // To:   "Name" <uri>
+
+  // IP or hostname that SIP INVITE is sent too
+  string address = 2;
+  // Hostname for the 'From' SIP address in INVITE
+  string hostname = 20;
+  string destination_country = 30;
+  livekit.SIPTransport transport = 16;
+
+  // Number used to make the call
+  string number = 3;
+
+  // Number to call to
+  string call_to = 4;
+
+  string username = 5;
+  string password = 6;
+
+  string room_name = 7;
+  string participant_identity = 8;
+  string participant_name = 14;
+  string participant_metadata = 15;
+  map<string, string> participant_attributes = 17;
+
+  // optional token that should be used when creating LiveKit participant
+  string token = 9;
+
+  // optional websocket url that should be used when creating LiveKit participant
+  string ws_url = 10;
+
+  // Optionally send following DTMF digits (extension codes) when making a call.
+  // Character 'w' can be used to add a 0.5 sec delay.
+  string dtmf = 11;
+
+  // Optionally play dialtone in the room as an audible indicator for existing participants
+  bool play_dialtone = 12;
+
+  map<string, string> headers = 21;
+  map<string, string> headers_to_attributes = 22;
+  // Map LiveKit attributes to SIP X-* headers when sending BYE or REFER requests.
+  map<string, string> attributes_to_headers = 26;
+  // Map SIP headers from 200 OK to sip.h.* participant attributes automatically.
+  livekit.SIPHeaderOptions include_headers = 27;
+
+  repeated livekit.SIPFeature enabled_features = 25;
+
+  // Max time for the callee to answer the call.
+  google.protobuf.Duration ringing_timeout = 23;
+  // Max call duration.
+  google.protobuf.Duration max_call_duration = 24;
+
+  livekit.SIPMediaEncryption media_encryption = 28 [deprecated = true];
+  livekit.SIPMediaConfig media = 34;
+
+  // Wait for the answer for the call before returning.
+  bool wait_until_answered = 29;
+
+  // Optional display name for the 'From' SIP header.
+  optional string display_name = 31;
+
+  // Destination information for routing decisions
+  livekit.Destination destination = 32;
+
+  // Project-level feature flags from ProjectSettings.FeatureFlags
+  map<string, string> feature_flags = 33;
+
+  SIPCallObservability observability = 38;
+
+  // NEXT ID: 39
+}
+
+message InternalCreateSIPParticipantResponse {
+  string participant_id = 1;
+  string participant_identity = 2;
+  string sip_call_id = 3;
+}
+
+message InternalTransferSIPParticipantRequest {
+  string sip_call_id = 1;
+  string transfer_to = 2;
+
+  // Optionally play dialtone to the SIP participant as an audible indicator of being transferred
+  bool play_dialtone = 3;
+
+  // Add the following headers to the REFER SIP request.
+  map<string, string> headers = 4;
+
+  // Max time for the transfer destination to answer the call.
+  google.protobuf.Duration ringing_timeout = 5;
+
+  // Project-level feature flags from ProjectSettings.FeatureFlags
+  map<string, string> feature_flags = 6;
+}
+
+message SIPCallObservability {
+  string destination = 1;
+  uint32 lifetime_days = 2;
+
+  string carrier_id = 3;
+  string country_code = 4;
+  livekit.PhoneNumberType number_type = 5;
+}

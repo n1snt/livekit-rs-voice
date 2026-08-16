@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package internal;
+
+option go_package = "github.com/livekit/psrpc/internal";
+
+import "google/protobuf/any.proto";
+
+// Wire envelope for the livekit psrpc Redis message bus. These messages are
+// serialized verbatim on the wire (compatible with livekit psrpc v0.7.x), so
+// field numbers and names are part of the wire contract and must not change.
+
+message Msg {
+  string type_url = 1;
+  bytes value = 2;
+  string channel = 3;
+}
+
+message Request {
+  string request_id = 1;
+  string client_id = 2;
+  int64 sent_at = 3;
+  int64 expiry = 4;
+  bool multi = 5;
+  google.protobuf.Any request = 6;
+  map<string, string> metadata = 7;
+  bytes raw_request = 8;
+  bool skip_claim = 9;
+}
+
+message Response {
+  string request_id = 1;
+  string server_id = 2;
+  int64 sent_at = 3;
+  google.protobuf.Any response = 4;
+  string error = 5;
+  string code = 6;
+  bytes raw_response = 7;
+  repeated google.protobuf.Any error_details = 8;
+}
+
+message ClaimRequest {
+  string request_id = 1;
+  string server_id = 2;
+  float affinity = 3;
+  bool handling = 4;
+}
+
+message ClaimResponse {
+  string request_id = 1;
+  string server_id = 2;
+}

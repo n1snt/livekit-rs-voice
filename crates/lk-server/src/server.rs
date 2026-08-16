@@ -23,6 +23,7 @@ pub struct Server {
     pub start_time: Instant,
     pub store: Arc<crate::redis_store::Store>,
     pub cluster: Arc<crate::cluster::Cluster>,
+    pub sip: tokio::sync::OnceCell<Arc<crate::psrpc::SipInternalClient>>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
 }
 
@@ -64,6 +65,7 @@ impl Server {
             start_time: Instant::now(),
             store,
             cluster,
+            sip: tokio::sync::OnceCell::new(),
             rooms: Mutex::new(HashMap::new()),
         })
     }
@@ -96,6 +98,35 @@ impl Server {
 
     pub fn get_room(&self, name: &str) -> Option<Arc<Room>> {
         self.rooms.lock().unwrap().get(name).cloned()
+    }
+
+    /// Lazily builds the psrpc client used to reach a `livekit/sip` bridge.
+    /// Outbound SIP requires Redis (the shared psrpc bus) plus a bridge.
+    pub async fn sip_client(&self) -> Result<Arc<crate::psrpc::SipInternalClient>, String> {
+        if let Some(client) = self.sip.get() {
+            return Ok(client.clone());
+        }
+        if !self.config.redis.is_configured() {
+            return Err(
+                "outbound SIP requires redis (psrpc bus) and a livekit/sip bridge".to_string(),
+            );
+        }
+        self.sip_client_with(Arc::new(crate::psrpc::RedisBus::new(&self.config)))
+            .await
+    }
+
+    /// Builds (or returns the cached) psrpc client over the given bus. Tests
+    /// inject an in-memory bus; production uses the Redis bus.
+    pub async fn sip_client_with(
+        &self,
+        bus: Arc<dyn crate::psrpc::PsrpcBus>,
+    ) -> Result<Arc<crate::psrpc::SipInternalClient>, String> {
+        if let Some(client) = self.sip.get() {
+            return Ok(client.clone());
+        }
+        let client = crate::psrpc::SipInternalClient::new(bus).await?;
+        let _ = self.sip.set(client.clone());
+        Ok(client)
     }
 
     pub fn list_rooms(&self) -> Vec<Arc<Room>> {

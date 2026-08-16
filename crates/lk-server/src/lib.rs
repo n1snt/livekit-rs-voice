@@ -8,6 +8,7 @@ pub mod http;
 pub mod media;
 pub mod metrics;
 pub mod participant;
+pub mod psrpc;
 pub mod redis_store;
 pub mod room;
 pub mod server;

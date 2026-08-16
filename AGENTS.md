@@ -19,8 +19,12 @@ unchanged.
 - **Audio only.** Video is out of scope; reject or ignore video tracks.
 - **Multi-node over Redis.** When `redis.cluster: true`, nodes register,
   rooms are hosted on one node, and signaling is relayed to the hosting node
-  over Redis streams (`cluster.rs`). Rust-native only, no Go psrpc interop.
-  When disabled (default), every room is local.
+  over Redis streams (`cluster.rs`). This node-to-node clustering is
+  Rust-native and does not interoperate with Go `livekit-server` nodes. The
+  exception is the SIP bridge: `psrpc.rs` implements the psrpc v0.7 wire
+  protocol (Redis PubSub) so `CreateSIPParticipant`/`TransferSIPParticipant`
+  reach a real `livekit/sip` container. When disabled (default), every room
+  is local.
 - **Lean docs.** The readme covers only benchmarks and the differences from
   `livekit-server`. Do not add docs that re-document LiveKit behavior.
 - **Never add or commit secrets/API keys.**
@@ -60,6 +64,7 @@ crates/lk-server/   the server:
   room.rs / participant.rs / track.rs   state models.
   agent.rs          worker registry + job dispatch (/agent).
   services.rs / services_sip.rs   Twirp method implementations.
+  psrpc.rs          psrpc v0.7 wire client (Redis PubSub) for outbound SIP.
   redis_store.rs    optional Redis store for SIP/egress container interop.
   webhook.rs / server.rs / metrics.rs  webhooks, room manager, metrics.
 ```

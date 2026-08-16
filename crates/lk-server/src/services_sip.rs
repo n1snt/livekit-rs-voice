@@ -2,10 +2,11 @@
 //!
 //! SIP trunks and dispatch rules are stored (Redis-backed when configured) so
 //! the external `livekit/sip` container can service inbound calls. Outbound
-//! call bridging requires the psrpc bus and is out of scope; a clear error is
-//! returned. Egress requests are persisted so the `livekit/egress` container
-//! can pick them up.
+//! calls (`CreateSIPParticipant`, `TransferSIPParticipant`) are bridged to a
+//! `livekit/sip` container over the psrpc message bus (`psrpc.rs`). Egress
+//! requests are persisted so the `livekit/egress` container can pick them up.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use lk_proto::livekit as lk;
@@ -381,16 +382,6 @@ pub async fn sip_service(
         "CreateSIPParticipant" => {
             ensure_sip_call(req)?;
             let r: lk::CreateSipParticipantRequest = parse_body(body, format)?;
-            // Validate the trunk exists when referenced.
-            if !r.sip_trunk_id.is_empty()
-                && store
-                    .load_sip_outbound_trunk(&r.sip_trunk_id)
-                    .await
-                    .map_err(twirp_internal)?
-                    .is_none()
-            {
-                return Err(trunk_not_found(&r.sip_trunk_id));
-            }
             if r.sip_call_to.is_empty() {
                 return Err(TwirpError::invalid_argument("sip_call_to is required"));
             }
@@ -399,15 +390,64 @@ pub async fn sip_service(
             }
             // Ensure the room exists so inbound/agent flows have a target.
             server.get_or_create_room(&r.room_name);
-            Err(TwirpError::failed_precondition(
-                "outbound SIP bridging requires the livekit/sip bridge (psrpc) which this voice-only server does not embed; create the trunk and dispatch rule via the API and let the bridge place the call",
-            ))
+            let ireq = build_internal_create_participant(server, &r).await?;
+            let client = server
+                .sip_client()
+                .await
+                .map_err(TwirpError::failed_precondition)?;
+            let resp = client
+                .create_sip_participant(&ireq)
+                .await
+                .map_err(psrpc_to_twirp)?;
+            out(
+                &lk::SipParticipantInfo {
+                    participant_id: resp.participant_id,
+                    participant_identity: resp.participant_identity,
+                    room_name: r.room_name,
+                    sip_call_id: resp.sip_call_id,
+                },
+                format,
+            )
         }
         "TransferSIPParticipant" => {
             ensure_sip_call(req)?;
-            Err(TwirpError::failed_precondition(
-                "SIP transfer requires the livekit/sip bridge",
-            ))
+            let r: lk::TransferSipParticipantRequest = parse_body(body, format)?;
+            if r.transfer_to.is_empty() {
+                return Err(TwirpError::invalid_argument("transferTo is required"));
+            }
+            if r.room_name.is_empty() {
+                return Err(TwirpError::invalid_argument("room_name is required"));
+            }
+            let room = server
+                .get_room(&r.room_name)
+                .ok_or_else(|| TwirpError::not_found("room not found"))?;
+            let participant = room
+                .get_participant_by_identity(&r.participant_identity)
+                .ok_or_else(|| TwirpError::not_found("participant not found"))?;
+            let sip_call_id = participant
+                .attributes
+                .lock()
+                .unwrap()
+                .get(ATTR_SIP_CALL_ID)
+                .cloned()
+                .ok_or_else(|| TwirpError::failed_precondition("participant is not a SIP participant"))?;
+            let ireq = lk_proto::rpc::InternalTransferSipParticipantRequest {
+                sip_call_id: sip_call_id.clone(),
+                transfer_to: r.transfer_to,
+                play_dialtone: r.play_dialtone,
+                headers: r.headers,
+                ringing_timeout: r.ringing_timeout,
+                ..Default::default()
+            };
+            let client = server
+                .sip_client()
+                .await
+                .map_err(TwirpError::failed_precondition)?;
+            client
+                .transfer_sip_participant(&sip_call_id, &ireq)
+                .await
+                .map_err(psrpc_to_twirp)?;
+            out(&lk_proto::well_known::Empty {}, format)
         }
         "ListSIPTrunk" => Err(TwirpError::failed_precondition(
             "deprecated ListSIPTrunk is not supported; use ListSIPInboundTrunk/ListSIPOutboundTrunk",
@@ -437,6 +477,218 @@ fn dispatch_rule_info(r: &lk::CreateSipDispatchRuleRequest) -> lk::SipDispatchRu
 
 fn twirp_internal(e: String) -> TwirpError {
     TwirpError::internal(e)
+}
+
+// ---------------------------------------------------------------------------
+// Outbound SIP (psrpc bridge)
+// ---------------------------------------------------------------------------
+
+const ATTR_SIP_CALL_ID: &str = "sip.callID";
+
+/// Maps a psrpc client error onto the matching Twirp error so API clients see
+/// the same semantics as the reference `livekit-server`.
+fn psrpc_to_twirp(e: crate::psrpc::PsrpcError) -> TwirpError {
+    match e {
+        crate::psrpc::PsrpcError::Timeout => {
+            TwirpError::deadline_exceeded("sip bridge did not respond in time")
+        }
+        crate::psrpc::PsrpcError::Rpc { message, .. } => TwirpError::failed_precondition(message),
+        other => TwirpError::internal(other.to_string()),
+    }
+}
+
+/// Carries the deprecated `media_encryption` value into `media.encryption`
+/// when the latter is unset (mirrors `SIPMediaConfig.UpgradeWith`).
+#[allow(deprecated)]
+fn upgrade_media(
+    media: &Option<lk::SipMediaConfig>,
+    encryption: i32,
+) -> Option<lk::SipMediaConfig> {
+    let mut m = media.clone()?;
+    if m.encryption.is_none() && encryption != 0 {
+        m.encryption = Some(encryption);
+    }
+    Some(m)
+}
+
+/// Merges a base media config (e.g. from a trunk) with an overlay, filling
+/// zero fields from the overlay (mirrors the reference `Merge` behavior).
+fn merge_media(
+    base: Option<lk::SipMediaConfig>,
+    other: Option<lk::SipMediaConfig>,
+) -> Option<lk::SipMediaConfig> {
+    match (base, other) {
+        (None, o) => o,
+        (Some(b), None) => Some(b),
+        (Some(mut b), Some(o)) => {
+            if !b.only_listed_codecs {
+                b.only_listed_codecs = o.only_listed_codecs;
+            }
+            if b.codecs.is_empty() {
+                b.codecs = o.codecs;
+            }
+            if b.encryption.is_none() {
+                b.encryption = o.encryption;
+            }
+            if b.media_timeout.is_none() {
+                b.media_timeout = o.media_timeout;
+            }
+            Some(b)
+        }
+    }
+}
+
+/// Builds the psrpc `InternalCreateSIPParticipantRequest`, mirroring
+/// `rpc.NewCreateSIPParticipantRequestResult` in `livekit-server`: resolves
+/// the outbound trunk, selects the caller number, and stamps the SIP
+/// participant attributes (`sip.callID`, `sip.trunkID`, ...).
+#[allow(deprecated)]
+async fn build_internal_create_participant(
+    server: &Arc<Server>,
+    r: &lk::CreateSipParticipantRequest,
+) -> Result<lk_proto::rpc::InternalCreateSipParticipantRequest, TwirpError> {
+    let store = server.store.clone();
+    let trunk = if r.sip_trunk_id.is_empty() {
+        None
+    } else {
+        Some(
+            store
+                .load_sip_outbound_trunk(&r.sip_trunk_id)
+                .await
+                .map_err(twirp_internal)?
+                .ok_or_else(|| trunk_not_found(&r.sip_trunk_id))?,
+        )
+    };
+
+    let mut hostname = String::new();
+    let mut from_host = String::new();
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    let mut include_headers = 0i32;
+    let mut transport = 0i32;
+    let mut destination_country = String::new();
+    let mut auth_user = String::new();
+    let mut auth_pass = String::new();
+    let mut hdr_to_attr: BTreeMap<String, String> = BTreeMap::new();
+    let mut attr_to_hdr: BTreeMap<String, String> = BTreeMap::new();
+    let mut trunk_media: Option<lk::SipMediaConfig> = None;
+
+    if let Some(trunk) = &trunk {
+        hostname = trunk.address.clone();
+        from_host = trunk.from_host.clone();
+        headers = trunk.headers.clone();
+        include_headers = trunk.include_headers;
+        transport = trunk.transport;
+        destination_country = trunk.destination_country.clone();
+        auth_user = trunk.auth_username.clone();
+        auth_pass = trunk.auth_password.clone();
+        hdr_to_attr = trunk.headers_to_attributes.clone();
+        attr_to_hdr = trunk.attributes_to_headers.clone();
+        trunk_media = upgrade_media(&trunk.media, trunk.media_encryption);
+    } else if let Some(cfg) = &r.trunk {
+        hostname = cfg.hostname.clone();
+        from_host = cfg.from_host.clone();
+        transport = cfg.transport;
+        destination_country = cfg.destination_country.clone();
+        auth_user = cfg.auth_username.clone();
+        auth_pass = cfg.auth_password.clone();
+        hdr_to_attr = cfg.headers_to_attributes.clone();
+        attr_to_hdr = cfg.attributes_to_headers.clone();
+    }
+
+    let mut outbound_number = r.sip_number.clone();
+    if outbound_number.is_empty() {
+        let numbers = trunk
+            .as_ref()
+            .map(|t| t.numbers.clone())
+            .unwrap_or_default();
+        if numbers.is_empty() {
+            return Err(TwirpError::failed_precondition(
+                "no numbers on outbound trunk",
+            ));
+        }
+        let idx = rand::random::<usize>() % numbers.len();
+        outbound_number = numbers[idx].clone();
+    }
+    if hostname.ends_with("twilio.com") && !outbound_number.starts_with('+') {
+        outbound_number = format!("+{outbound_number}");
+    }
+
+    let call_id = crate::core::generate_id("SC_");
+    let trunk_id = if !r.sip_trunk_id.is_empty() {
+        r.sip_trunk_id.clone()
+    } else {
+        trunk
+            .as_ref()
+            .map(|t| t.sip_trunk_id.clone())
+            .unwrap_or_default()
+    };
+    let mut attrs = r.participant_attributes.clone();
+    attrs.insert(ATTR_SIP_CALL_ID.to_string(), call_id.clone());
+    attrs.insert("sip.trunkID".to_string(), trunk_id.clone());
+    if !r.hide_phone_number {
+        attrs.insert("sip.phoneNumber".to_string(), r.sip_call_to.clone());
+        attrs.insert("sip.hostname".to_string(), hostname.clone());
+        attrs.insert("sip.trunkPhoneNumber".to_string(), outbound_number.clone());
+    }
+
+    let mut features = Vec::new();
+    if r.krisp_enabled {
+        features.push(lk::SipFeature::KrispEnabled as i32);
+    }
+    if !r.headers.is_empty() {
+        headers.extend(r.headers.clone());
+    }
+    if r.include_headers != 0 {
+        include_headers = r.include_headers;
+    }
+
+    let participant_identity = if r.participant_identity.is_empty() {
+        format!("sip_{}", r.sip_call_to)
+    } else {
+        r.participant_identity.clone()
+    };
+
+    let media = merge_media(trunk_media, upgrade_media(&r.media, r.media_encryption));
+
+    Ok(lk_proto::rpc::InternalCreateSipParticipantRequest {
+        project_id: String::new(),
+        sip_call_id: call_id,
+        sip_trunk_id: trunk_id,
+        sip_request_uri: r.sip_request_uri.clone(),
+        sip_from_header: r.sip_from_header.clone(),
+        sip_to_header: r.sip_to_header.clone(),
+        address: hostname,
+        hostname: from_host,
+        destination_country,
+        transport,
+        number: outbound_number,
+        call_to: r.sip_call_to.clone(),
+        username: auth_user,
+        password: auth_pass,
+        room_name: r.room_name.clone(),
+        participant_identity,
+        participant_name: r.participant_name.clone(),
+        participant_metadata: r.participant_metadata.clone(),
+        participant_attributes: attrs,
+        token: String::new(),
+        ws_url: String::new(),
+        dtmf: r.dtmf.clone(),
+        play_dialtone: r.play_ringtone || r.play_dialtone,
+        headers,
+        headers_to_attributes: hdr_to_attr,
+        attributes_to_headers: attr_to_hdr,
+        include_headers,
+        enabled_features: features,
+        ringing_timeout: r.ringing_timeout,
+        max_call_duration: r.max_call_duration,
+        media_encryption: media.as_ref().and_then(|m| m.encryption).unwrap_or(0),
+        media,
+        wait_until_answered: r.wait_until_answered,
+        display_name: r.display_name.clone(),
+        destination: r.destination.clone(),
+        feature_flags: Default::default(),
+        observability: None,
+    })
 }
 
 // ---------------------------------------------------------------------------

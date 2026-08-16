@@ -10,6 +10,10 @@ description = "A voice-only LiveKit server in Rust."
 name = "livekit-voice"
 path = "src/main.rs"
 
+[[bin]]
+name = "lk"
+path = "src/bin/lk.rs"
+
 [dependencies]
 lk-proto = { workspace = true }
 prost = { workspace = true }
@@ -47,11 +51,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 tokio-tungstenite = "0.26"
 async-trait = { workspace = true }
+clap = { version = "4.5.61", features = ["derive", "env"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
 http = "1"
 criterion = { workspace = true }
+futures-util.workspace = true
 
 [[bench]]
 name = "core"

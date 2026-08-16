@@ -15,6 +15,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "livekit_sip.proto",
         "livekit_ingress.proto",
         "livekit_webhook.proto",
+        "internal.proto",
+        "rpc/sip.proto",
     ];
     let files: Vec<String> = files
         .iter()
@@ -61,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("fds encode failed: {e:?}"))?;
     b.register_descriptors(&fds_bytes)
         .map_err(|e| format!("register_descriptors failed: {e:?}"))?;
-    b.build(&[".livekit", ".google"])
+    b.build(&[".livekit", ".google", ".internal", ".rpc"])
         .map_err(|e| format!("pbjson build failed: {e:?}"))?;
 
     Ok(())

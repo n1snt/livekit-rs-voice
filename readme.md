@@ -34,9 +34,12 @@ Images are published to GHCR on every `v*` tag.
   failover is basic (rooms are reclaimed by other nodes, in-flight sessions
   reconnect).
 - **No embedded TURN.** Media uses host candidates (`rtc.ips.includes`).
-- **Outbound SIP** (`CreateSIPParticipant`) is not bridged: it needs the
-  `livekit/sip` psrpc bus that this server does not embed. Trunk and dispatch
-  CRUD plus inbound calls via `livekit/sip` work.
+- **Outbound SIP** (`CreateSIPParticipant`, `TransferSIPParticipant`) is
+  bridged over the psrpc wire protocol (Redis PubSub, compatible with
+  livekit psrpc v0.7): configure `redis` and run a `livekit/sip` container on
+  the same Redis, then place calls with the `lk` CLI
+  (`lk sip create-participant ...`) or the Twirp API. Trunk and dispatch CRUD
+  plus inbound calls via `livekit/sip` work.
 - **Egress** persists requests for the `livekit/egress` container to pick up;
   the container does the actual recording.
 - **Webhooks** use the LiveKit-Cloud-style

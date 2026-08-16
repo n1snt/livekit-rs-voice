@@ -75,6 +75,13 @@ impl TwirpError {
             msg: msg.into(),
         }
     }
+    pub fn deadline_exceeded(msg: impl Into<String>) -> Self {
+        TwirpError {
+            code: "deadline_exceeded",
+            status: StatusCode::GATEWAY_TIMEOUT,
+            msg: msg.into(),
+        }
+    }
     pub fn bad_route(msg: impl Into<String>) -> Self {
         TwirpError {
             code: "bad_route",

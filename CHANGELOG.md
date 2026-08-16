@@ -16,10 +16,18 @@ always reflects the LiveKit protocol level the server implements.
 
 ## [Unreleased]
 
-### Planned
+### Added
 
-- Rust-native Redis clustering (multi-node room dispatch and presence); not yet
-  implemented.
+- TURN relay (RFC 8489/5766) with JoinResponse ICE server credentials.
+- Outbound SIP bridging over the psrpc wire protocol (v0.7 Redis PubSub):
+  `CreateSIPParticipant` / `TransferSIPParticipant` reach a real `livekit/sip`
+  container over a shared Redis bus.
+- `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules
+  through the Twirp API.
+
+### Fixed
+
+- Clustering (Redis) was still tracked as "planned"; it has shipped.
 
 ## [1.13.5] - 2026-08-16
 
