@@ -15,4 +15,5 @@ pub mod services;
 pub mod services_sip;
 pub mod signal;
 pub mod track;
+pub mod turn;
 pub mod webhook;

@@ -125,6 +125,11 @@ impl KeyProvider {
         self.keys.contains_key(api_key)
     }
 
+    /// The full api key -> secret map (used by the TURN auth handler).
+    pub fn as_map(&self) -> std::collections::BTreeMap<String, String> {
+        self.keys.clone()
+    }
+
     /// Parse and fully verify a bearer token against the configured keys.
     pub fn verify(&self, token: &str) -> Result<VerifiedToken, AuthError> {
         // 1. Read claims without verifying the signature to discover the API key.

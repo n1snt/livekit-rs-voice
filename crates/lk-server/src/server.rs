@@ -138,6 +138,16 @@ impl Server {
     /// Background worker: room empty-timeout enforcement and active-speaker
     /// broadcasts.
     pub fn start_background_tasks(self: &Arc<Self>) {
+        // Embedded TURN server (if enabled).
+        {
+            let config = self.config.clone();
+            let keys = self.keys.as_map();
+            tokio::spawn(async move {
+                if let Err(e) = crate::turn::start_turn_server(&config, keys).await {
+                    tracing::error!("failed to start TURN server: {e}");
+                }
+            });
+        }
         self.cluster.start_heartbeat();
         if self.cluster.is_enabled() {
             let server = self.clone();

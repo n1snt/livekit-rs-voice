@@ -942,7 +942,11 @@ pub fn build_join_response(
         participant: Some(participant.to_proto()),
         other_participants: others,
         server_version: SERVER_VERSION.to_string(),
-        ice_servers: vec![],
+        ice_servers: crate::turn::ice_servers(
+            &server.config,
+            &server.keys.as_map(),
+            &participant.sid,
+        ),
         subscriber_primary: true,
         client_configuration: Some(lk::ClientConfiguration::default()),
         server_region: server.config.region.clone(),
