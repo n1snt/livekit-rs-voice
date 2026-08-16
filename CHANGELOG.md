@@ -27,6 +27,7 @@ Versions mirror [livekit-server](https://github.com/livekit/livekit) releases: `
 - `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules through the Twirp API.
 - Drop-in Prometheus metrics matching the reference `livekit-server` names, labels, and histogram buckets: rooms, participants, connections, tracks, session latency/duration, connection-quality score, RTP packets, RTCP feedback (NACK/PLI/FIR), per-stream packet loss/out-of-order/jitter/RTT, and forwarding latency (from RTCP sender reports). Existing LiveKit Grafana dashboards work unchanged. See `crates/lk-server/src/metrics.rs`.
 - Multi-node clustering over Redis (`redis.cluster: true`).
+- `livekit-egress`: a voice-only recorder (WAV/MP3) hosted in this monorepo, dispatched over the psrpc bus and reporting state back via `IOInfo`.
 
 ### Fixed
 

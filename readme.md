@@ -1,9 +1,13 @@
 # livekit-rs-voice
 
-A minimal, voice-only LiveKit server. A drop-in replacement in Rust for the audio path of [livekit-server](https://github.com/livekit/livekit). It speaks the same LiveKit wire protocol, so existing LiveKit clients, `livekit-agents`, and the `livekit/sip` + `livekit/egress` containers connect and work unchanged.
+A monorepo of minimal, voice-only LiveKit services in Rust, drop-in replacements for the audio path of [livekit-server](https://github.com/livekit/livekit): `livekit-voice` (the SFU) and `livekit-egress` (the voice recorder). They speak the same LiveKit wire protocol, so existing LiveKit clients, `livekit-agents`, and the `livekit/sip` container connect and work unchanged.
 
 Everything not listed under [Differences from LiveKit](#differences-from-livekit) behaves like the reference `livekit-server`; configure and use it the same way (see the [LiveKit docs](https://docs.livekit.io)).
 
+## Services
+
+- **`livekit-voice`** — the server (SFU): signaling, media, SIP, metrics.
+- **`livekit-egress`** — the voice-only recorder: receives egress jobs from `livekit-voice` over Redis (psrpc), joins rooms as a subscriber, and records audio to WAV/MP3.
 ## Quick start
 
 ```bash
@@ -16,13 +20,16 @@ docker run --rm -p 7880:7880 -p 7881:7881/udp -p 7881:7881/tcp -p 7882:7882 \
 cargo run --release -p lk-server -- --dev
 ```
 
-Images are published to [Docker Hub](https://hub.docker.com/r/n1snt/livekit-rs-voice) on every `v*` tag.
+Images are published to Docker Hub on every `v*` tag; each service ships its own small image:
+[`n1snt/livekit-rs-voice`](https://hub.docker.com/r/n1snt/livekit-rs-voice) and
+[`n1snt/livekit-rs-egress`](https://hub.docker.com/r/n1snt/livekit-rs-egress).
 
 ## Differences from LiveKit
 
 - **Audio only** (video tracks are rejected).
 - **Multi-node over Redis** (`redis.cluster: true`); does not interoperate with Go `livekit-server` nodes.
-- **SIP & Egress** interoperate with the `livekit/sip` and `livekit/egress` containers over Redis (psrpc).
+- **SIP** interoperates with the `livekit/sip` container over Redis (psrpc).
+- **Egress** is served by the in-repo `livekit-egress` recorder over Redis (psrpc), instead of the `livekit/egress` container.
 - **Webhooks** signed with `X-Livekit-Signature: hex(HMAC-SHA256(...))`.
 - **Metrics** are drop-in compatible with `livekit-server` (`metrics.rs`).
 

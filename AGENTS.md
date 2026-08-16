@@ -4,13 +4,13 @@ Guidance for AI agents and contributors working in this repository.
 
 ## Project
 
-`livekit-rs-voice` is a voice-only, LiveKit-wire-compatible SFU in Rust. It is a drop-in for the audio path of `livekit-server`: existing LiveKit clients, `livekit-agents`, and the `livekit/sip` + `livekit/egress` containers connect unchanged.
+`livekit-rs-voice` is a **monorepo** for voice-only, LiveKit-wire-compatible services in Rust, drop-in replacements for the corresponding `livekit-server` components: `livekit-voice` (the SFU) and `livekit-egress` (the recorder). Existing LiveKit clients, `livekit-agents`, and the `livekit/sip` + `livekit/egress` containers connect unchanged. Each service ships as its own small Docker image.
 
 ### Hard constraints
 
 - **Wire compatibility is the contract.** Never change proto field numbers, message names, protojson casing, enum string names, Twirp routes/error codes, or WebSocket framing. The vendored `.proto` files in `protos/` are the source of truth; if unsure about a wire name, check the generated code in `target/.../out/`.
 - **Audio only.** Video is out of scope; reject or ignore video tracks.
-- **Multi-node over Redis.** When `redis.cluster: true`, nodes register, rooms are hosted on one node, and signaling is relayed to the hosting node over Redis streams (`cluster.rs`). This node-to-node clustering is Rust-native and does not interoperate with Go `livekit-server` nodes. The exception is the SIP bridge: `psrpc.rs` implements the psrpc v0.7 wire protocol (Redis PubSub) so `CreateSIPParticipant`/`TransferSIPParticipant` reach a real `livekit/sip` container. When disabled (default), every room is local.
+- **Multi-node over Redis.** When `redis.cluster: true`, nodes register, rooms are hosted on one node, and signaling is relayed to the hosting node over Redis streams (`cluster.rs`). This node-to-node clustering is Rust-native and does not interoperate with Go `livekit-server` nodes. The exception is the SIP/egress bridges: `psrpc.rs` implements the psrpc v0.7 wire protocol (Redis PubSub) so `CreateSIPParticipant`/`TransferSIPParticipant` reach a real `livekit/sip` container and `StartEgress` reaches `livekit-egress`. When disabled (default), every room is local.
 - **Lean docs.** The readme covers only benchmarks and the differences from `livekit-server`. Do not add docs that re-document LiveKit behavior.
 - **Never add or commit secrets/API keys.**
 
@@ -56,6 +56,10 @@ crates/lk-server/   the server:
                     metrics.rs exposes the reference `livekit-server`
                     Prometheus contract (same names/labels/buckets), fed by
                     media-plane RTCP/RTP stats (see media.rs Forwarder).
+crates/lk-egress/   the voice-only recorder (bin `livekit-egress`):
+                    psrpc `EgressInternal` server (StartEgress), connects to
+                    rooms as a subscriber, decodes Opus, mixes, and encodes to
+                    WAV/MP3. Each crate ships its own Docker image.
 ```
 
 ## Rules
@@ -66,10 +70,12 @@ crates/lk-server/   the server:
 - **Broadcasts are best-effort:** `send_update` (bounded `try_send`) for fan-out; awaited `send` for request/response messages.
 - **Do not block the join path on agent availability round-trips.** Spawn them (see `signal.rs` room-agent launch).
 - **Enforce configured limits** (`limit.*`, message/body sizes). Do not let a client push unbounded data.
+- **Mind Docker image size.** Each service ships its own image; keep them small (strip binaries, slim bases). Check `docker images` size when adding or changing a Dockerfile, and keep an eye on base-image choice and new runtime dependencies.
 
 ## Testing
 
 - Every change adds tests: unit tests beside the module, integration tests in `crates/lk-server/tests/signaling.rs`, and the real-media loopback in `crates/lk-server/tests/media.rs` must keep passing.
+- The egress crate (`crates/lk-egress`) needs its own tests: unit tests for encode/mix/psrpc handling, plus an integration test that records a real audio stream.
 - Protocol invariants (protojson casing, `Timestamp`/`Duration` string forms, enum values, oneof key shapes) are asserted in `lk-proto` tests.
 
 ## Docs policy
