@@ -67,6 +67,7 @@ pub async fn run_recording(
     path: &str,
     format: OutputFormat,
     mp3_bitrate: i32,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<u64, String> {
     let mut mixer = Mixer::new();
     let mut wav = if format == OutputFormat::Wav {
@@ -81,10 +82,18 @@ pub async fn run_recording(
     };
     let mut frames: u64 = 0;
 
-    while let Some(packet) = audio.recv().await {
+    loop {
+        let packet = tokio::select! {
+            p = audio.recv() => p,
+            _ = cancel.changed() => None,
+        };
+        let Some(packet) = packet else { break };
         let pcm = match decode_opus(&packet.payload) {
             Ok(pcm) => pcm,
-            Err(_) => continue, // skip a malformed frame rather than abort
+            Err(e) => {
+                tracing::debug!(len = packet.payload.len(), "decode_opus failed: {e}");
+                continue;
+            }
         };
         mixer.push(&packet.track_cid, pcm);
         // Drain fixed-size frames; mix whatever is available in all tracks.
@@ -133,6 +142,7 @@ pub fn finished_info(
     room_name: &str,
     path: &str,
     request: lk::egress_info::Request,
+    frames: u64,
 ) -> lk::EgressInfo {
     let now = crate::now_secs();
     lk::EgressInfo {
@@ -146,7 +156,7 @@ pub fn finished_info(
             filename: path.to_string(),
             started_at: now,
             ended_at: now,
-            duration: 0,
+            duration: (frames * 20) as i64,
             location: String::new(),
             size: 0,
         })),

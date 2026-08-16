@@ -59,7 +59,8 @@ pub trait PsrpcBus: Send + Sync {
 /// message bus exactly (raw protobuf `Msg` envelopes on PubSub channels).
 /// Redis connection settings (a subset of the lk-server config, self-contained
 /// so this crate has no dependency on the server).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct RedisConfig {
     pub address: String,
     pub username: String,
@@ -513,14 +514,27 @@ impl PsrpcServer {
         }))
     }
 
-    /// Starts listening for `method` and dispatches requests to `handler`.
+    /// Starts listening for `method` on the default (empty) topic and
+    /// dispatches requests to `handler`.
     pub async fn register(
         self: &Arc<Self>,
         method: &str,
         handler: Arc<dyn IoHandler>,
     ) -> Result<(), String> {
-        let rpc_ch = rpc_channel(&self.service, method, "");
-        let rclaim_ch = claim_response_channel(&self.service, method, "");
+        self.register_topic(method, "", handler).await.map(|_| ())
+    }
+
+    /// Starts listening for `method` on a specific topic (e.g. a per-call or
+    /// per-egress topic) and dispatches requests to `handler`. Returns a join
+    /// handle that can be aborted to deregister the topic.
+    pub async fn register_topic(
+        self: &Arc<Self>,
+        method: &str,
+        topic: &str,
+        handler: Arc<dyn IoHandler>,
+    ) -> Result<tokio::task::JoinHandle<()>, String> {
+        let rpc_ch = rpc_channel(&self.service, method, topic);
+        let rclaim_ch = claim_response_channel(&self.service, method, topic);
         let mut stream = self
             .bus
             .subscribe(vec![rpc_ch.clone(), rclaim_ch.clone()])
@@ -530,7 +544,7 @@ impl PsrpcServer {
         let server_id = self.server_id.clone();
         let method = method.to_string();
         let handler = handler.clone();
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             // request_id -> (client_id, raw_request, expiry)
             let mut pending: HashMap<String, (String, Vec<u8>, i64)> = HashMap::new();
             while let Some((channel, payload)) = stream.next().await {
@@ -600,8 +614,7 @@ impl PsrpcServer {
                     });
                 }
             }
-        });
-        Ok(())
+        }))
     }
 }
 

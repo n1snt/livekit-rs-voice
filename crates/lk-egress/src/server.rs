@@ -1,23 +1,29 @@
-//! psrpc `EgressInternal` server: receives `StartEgress` / `ListActiveEgress`
-//! from the livekit-voice server and runs voice recordings.
+//! psrpc egress services: `EgressInternal` (StartEgress / ListActiveEgress)
+//! and `EgressHandler` (StopEgress, per-egress topic), receiving jobs from the
+//! livekit-voice server and running voice recordings.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use lk_proto::livekit as lk;
 use lk_proto::rpc;
 use lk_psrpc::{IoHandler, PsrpcBus, PsrpcServer};
 use prost::Message as _;
+use tokio::sync::watch;
 
 use crate::client;
 use crate::config::EgressConfig;
 use crate::io::IoClient;
 use crate::recorder::{self, OutputFormat};
 
-/// The recorder instance: hosts the `EgressInternal` service and tracks active
-/// recordings.
+type Stops = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
+type Infos = Arc<Mutex<HashMap<String, lk::EgressInfo>>>;
+
+/// The recorder instance: hosts the `EgressInternal` + `EgressHandler`
+/// services and tracks active recordings.
 pub struct EgressServer {
-    server: Arc<PsrpcServer>,
+    _internal: Arc<PsrpcServer>,
+    _handler: Arc<PsrpcServer>,
 }
 
 impl EgressServer {
@@ -26,23 +32,45 @@ impl EgressServer {
         conf: EgressConfig,
         io: Arc<IoClient>,
     ) -> Result<Arc<Self>, String> {
-        let server = PsrpcServer::new(bus, "EgressInternal").await?;
+        let stops: Stops = Arc::new(Mutex::new(HashMap::new()));
+        let infos: Infos = Arc::new(Mutex::new(HashMap::new()));
+        let handler = PsrpcServer::new(bus.clone(), "EgressHandler").await?;
         let handlers = Arc::new(Handlers {
             conf,
             io,
             active: Arc::new(Mutex::new(HashSet::new())),
+            stops: stops.clone(),
+            infos: infos.clone(),
+            handler: handler.clone(),
+            stop_tasks: Arc::new(Mutex::new(HashMap::new())),
         });
-        let svc = Arc::new(EgressServer { server });
-        svc.server.register("StartEgress", handlers.clone()).await?;
-        svc.server.register("ListActiveEgress", handlers).await?;
-        Ok(svc)
+        let internal = PsrpcServer::new(bus, "EgressInternal").await?;
+        internal.register("StartEgress", handlers.clone()).await?;
+        internal.register("ListActiveEgress", handlers).await?;
+        let _ = stops;
+        let _ = infos;
+        Ok(Arc::new(EgressServer {
+            _internal: internal,
+            _handler: handler,
+        }))
     }
+}
+
+/// Shared context passed to a recording job.
+struct JobCtx {
+    io: Arc<IoClient>,
+    active: Arc<Mutex<HashSet<String>>>,
+    infos: Infos,
 }
 
 struct Handlers {
     conf: EgressConfig,
     io: Arc<IoClient>,
     active: Arc<Mutex<HashSet<String>>>,
+    stops: Stops,
+    infos: Infos,
+    handler: Arc<PsrpcServer>,
+    stop_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 /// The room + output format for a recording request.
@@ -111,6 +139,31 @@ fn request_info(req: &rpc::StartEgressRequest) -> Option<lk::egress_info::Reques
     }
 }
 
+/// Per-egress `StopEgress` handler (topic = egress id): signals the recording
+/// to stop and returns the current info.
+struct StopHandler {
+    stops: Stops,
+    infos: Infos,
+}
+
+#[async_trait::async_trait]
+impl IoHandler for StopHandler {
+    async fn handle(&self, _method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+        let req = lk::StopEgressRequest::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+        let egress_id = req.egress_id.clone();
+        if let Some(tx) = self.stops.lock().unwrap().get(&egress_id) {
+            let _ = tx.send(true);
+        }
+        self.infos
+            .lock()
+            .unwrap()
+            .get(&egress_id)
+            .cloned()
+            .map(|i| i.encode_to_vec())
+            .ok_or_else(|| format!("egress {egress_id} not found"))
+    }
+}
+
 #[async_trait::async_trait]
 impl IoHandler for Handlers {
     async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -138,35 +191,67 @@ impl IoHandler for Handlers {
                     ..Default::default()
                 };
                 let _ = self.io.create_egress(&starting).await;
+                self.infos
+                    .lock()
+                    .unwrap()
+                    .insert(egress_id.clone(), starting.clone());
+
+                let (stop_tx, stop_rx) = watch::channel(false);
+                self.stops
+                    .lock()
+                    .unwrap()
+                    .insert(egress_id.clone(), stop_tx);
+                self.active.lock().unwrap().insert(egress_id.clone());
+
+                // Register the per-egress StopEgress topic.
+                let stop_handler = Arc::new(StopHandler {
+                    stops: self.stops.clone(),
+                    infos: self.infos.clone(),
+                });
+                let stop_task = self
+                    .handler
+                    .register_topic("StopEgress", &egress_id, stop_handler)
+                    .await?;
+                self.stop_tasks
+                    .lock()
+                    .unwrap()
+                    .insert(egress_id.clone(), stop_task);
 
                 let conf = self.conf.clone();
-                let io = self.io.clone();
-                let active = self.active.clone();
-                self.active.lock().unwrap().insert(egress_id.clone());
+                let ctx = JobCtx {
+                    io: self.io.clone(),
+                    active: self.active.clone(),
+                    infos: self.infos.clone(),
+                };
+                let stop_tasks = self.stop_tasks.clone();
                 tokio::spawn(async move {
-                    let _ = run_one(&conf, &io, &active, &egress_id, &room, format).await;
+                    if let Err(e) = run_one(&conf, &ctx, &egress_id, &room, format, stop_rx).await {
+                        tracing::warn!(egress_id, "recording failed: {e}");
+                    }
+                    if let Some(task) = stop_tasks.lock().unwrap().remove(&egress_id) {
+                        task.abort();
+                    }
                 });
-
                 Ok(starting.encode_to_vec())
             }
             "ListActiveEgress" => {
                 let ids: Vec<String> = self.active.lock().unwrap().iter().cloned().collect();
                 Ok(rpc::ListActiveEgressResponse { egress_ids: ids }.encode_to_vec())
             }
-            _ => Err(format!("unknown EgressInternal method: {method}")),
+            _ => Err(format!("unknown egress method: {method}")),
         }
     }
 }
 
-/// Records one room's audio to `output_dir/{egress_id}.{ext}` and reports the
-/// final state back to the server.
+/// Records one room's audio to `output_dir/{egress_id}.{ext}`, stopping on
+/// `StopEgress` or when the room's audio stream ends.
 async fn run_one(
     conf: &EgressConfig,
-    io: &Arc<IoClient>,
-    active: &Arc<Mutex<HashSet<String>>>,
+    ctx: &JobCtx,
     egress_id: &str,
     room: &str,
     format: OutputFormat,
+    stop_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let ext = if format == OutputFormat::Mp3 {
         "mp3"
@@ -182,14 +267,19 @@ async fn run_one(
         &format!("egress_{egress_id}"),
     )
     .await?;
-    let _ = recorder::run_recording(audio, &path, format, conf.mp3_bitrate).await?;
+    let frames =
+        recorder::run_recording(audio, &path, format, conf.mp3_bitrate, stop_rx.clone()).await?;
     let request = lk::egress_info::Request::RoomComposite(lk::RoomCompositeEgressRequest {
         room_name: room.to_string(),
         ..Default::default()
     });
-    let info = recorder::finished_info(egress_id, room, &path, request);
-    let _ = io.update_egress(&info).await;
-    active.lock().unwrap().remove(egress_id);
-    tracing::info!(egress_id, room, path, "recording finished");
+    let info = recorder::finished_info(egress_id, room, &path, request, frames);
+    let _ = ctx.io.update_egress(&info).await;
+    ctx.infos
+        .lock()
+        .unwrap()
+        .insert(egress_id.to_string(), info.clone());
+    ctx.active.lock().unwrap().remove(egress_id);
+    tracing::info!(egress_id, room, path, frames, "recording finished");
     Ok(())
 }

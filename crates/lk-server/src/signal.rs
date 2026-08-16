@@ -871,7 +871,7 @@ pub async fn join_room(
     } else {
         grant.room.clone()
     };
-    if !params.publish && !token.can_publish() {
+    if params.publish && !token.can_publish() {
         return Err("publish permission denied".to_string());
     }
 

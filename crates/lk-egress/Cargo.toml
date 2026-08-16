@@ -39,6 +39,10 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+audiopus = "0.3.0-rc.0"
+axum.workspace = true
+lk-server = { path = "../lk-server" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { workspace = true }
 
 [build-dependencies]
