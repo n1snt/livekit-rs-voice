@@ -5,7 +5,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Releases are tagged `vX.Y.Z` and published as multi-arch (linux/amd64 and
-linux/arm64) Docker images to Docker Hub (`n1snt/livekit-rs-voice`) and GHCR.
+linux/arm64) Docker images to [Docker Hub](https://hub.docker.com/r/n1snt/livekit-rs-voice).
 
 ## Versioning policy
 

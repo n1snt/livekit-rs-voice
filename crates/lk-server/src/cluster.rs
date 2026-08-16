@@ -81,6 +81,10 @@ pub struct RedisBus {
     db: i64,
     use_tls: bool,
     conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
+    /// Dedicated connection for blocking reads (`XREAD BLOCK`). A blocking
+    /// command would otherwise tie up the shared manager and stall every other
+    /// Redis command (room routing, heartbeats) for up to the block duration.
+    block_conn: tokio::sync::OnceCell<redis::aio::MultiplexedConnection>,
 }
 
 impl RedisBus {
@@ -92,13 +96,11 @@ impl RedisBus {
             db: config.redis.db,
             use_tls: config.redis.use_tls,
             conn: tokio::sync::OnceCell::new(),
+            block_conn: tokio::sync::OnceCell::new(),
         })
     }
 
-    async fn conn(&self) -> Result<redis::aio::ConnectionManager, String> {
-        if let Some(c) = self.conn.get() {
-            return Ok(c.clone());
-        }
+    fn client(&self) -> Result<redis::Client, String> {
         let url = format!(
             "{}://{}:{}@{}/{}",
             if self.use_tls { "rediss" } else { "redis" },
@@ -107,13 +109,33 @@ impl RedisBus {
             self.address,
             self.db
         );
-        let client = redis::Client::open(url).map_err(|e| format!("redis connect: {e}"))?;
-        let manager = client
+        redis::Client::open(url).map_err(|e| format!("redis connect: {e}"))
+    }
+
+    async fn conn(&self) -> Result<redis::aio::ConnectionManager, String> {
+        if let Some(c) = self.conn.get() {
+            return Ok(c.clone());
+        }
+        let manager = self
+            .client()?
             .get_connection_manager()
             .await
             .map_err(|e| format!("redis manager: {e}"))?;
         let _ = self.conn.set(manager.clone());
         Ok(manager)
+    }
+
+    async fn block_conn(&self) -> Result<redis::aio::MultiplexedConnection, String> {
+        if let Some(c) = self.block_conn.get() {
+            return Ok(c.clone());
+        }
+        let conn = self
+            .client()?
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| format!("redis block conn: {e}"))?;
+        let _ = self.block_conn.set(conn.clone());
+        Ok(conn)
     }
 }
 
@@ -186,7 +208,9 @@ impl ClusterBus for RedisBus {
         last_id: &str,
         timeout_ms: u64,
     ) -> Result<Option<Vec<(String, Vec<(String, String)>)>>, String> {
-        let mut c = self.conn().await?;
+        // Blocking reads on their own connection so `XREAD BLOCK` never stalls
+        // the shared manager (and with it room routing / heartbeats).
+        let mut c = self.block_conn().await?;
         let opts = redis::streams::StreamReadOptions::default().block(timeout_ms as usize);
         let reply: redis::streams::StreamReadReply =
             redis::AsyncCommands::xread_options(&mut c, &[stream], &[last_id], &opts)

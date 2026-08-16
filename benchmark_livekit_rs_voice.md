@@ -1,43 +1,61 @@
 # Benchmark: `livekit-rs-voice` vs Go `livekit-server`
 
-Signaling performance of the Rust voice-only server against the reference Go
-`livekit-server`, measured on the same host.
+Signaling performance of the Rust voice-only server against the reference Go `livekit-server`, measured on the same host.
 
-**Summary:** for the signaling-heavy voice workload, the Rust server joins
-**~7-10x faster**, uses **~2.6x less memory per connection**, and does
-**5-23x more work per CPU-second**.
+**Summary:** for the signaling-heavy voice workload, the Rust server joins calls **~19x faster** (p50), sustains **~17x more joins/s**, uses **~2x less memory per connection**, and does **~2x more pings and ~7x more joins per CPU-second**.
 
 ## Environment
 
 | | |
 |---|---|
 | Host | MacBook Pro (Apple M1), 32 GB RAM, 1 TB SSD, loopback networking |
-| Rust server | `livekit-rs-voice`, `--release`, natively on the host |
+| Rust server | `livekit-rs-voice`, `--release` (LTO, stripped), natively on the host |
 | Go server | `livekit/livekit-server` v1.11.0, in Docker (Redis signaling relay) |
-| Load | `load_test` binary, real WebSocket clients, identical scenarios on both |
+| Load | `load_test` binary, real WebSocket clients, 200 clients / 100 rooms |
 
-> The Go server runs in Docker with a Redis relay in its signal path; the Rust
-> server is single-node and in-process. That difference is real and favors the
-> Rust server for this project's single-node deployment.
+> The Go server runs in Docker with a Redis relay and full multi-node capability; the Rust server is single-node and in-process in these runs. That tradeoff favors the Rust server on latency, but in-process state is not crash-durable, and multi-node (`redis.cluster: true`) puts Redis back in the request path with more basic failover than Go's. These numbers reflect the single-node topology.
 
 ## Headline numbers
 
 | Metric | Rust | Go |
 |---|---|---|
-| Idle memory | **~5 MB**, ~0% CPU | ~15 MB, ~1.4% CPU |
-| Memory, 200 stable connections | **~69 MB** (~330 KB/conn) | ~190 MB (~870 KB/conn) |
-| Signal throughput | **~58 k pongs/CPU-s** | ~7.8 k pongs/CPU-s |
-| Join/leave throughput | **~2.9 k joins/CPU-s** | ~129 joins/CPU-s |
+| Idle memory | **~6 MB**, ~0% CPU | ~12 MB anon, ~1.2% CPU |
+| Memory, 200 stable connections | **~66 MB** (~330 KB/conn) | ~136 MB anon (~680 KB/conn) |
+| Join latency (p50) | **14.5 ms** | 279 ms |
+| Signal RTT (p50) | **1.27 ms** | 5.10 ms |
+| Join/leave throughput | **12,199 joins/s** | 721 joins/s |
 
-## Load tests (200 clients, 20 rooms)
+## Latency & throughput (sequential, warmed)
 
 | Scenario | Rust | Go | Speedup |
 |---|---|---|---|
-| Join latency, p50 | **10.4 ms** | 110.9 ms | **10.7x** |
-| Join latency, avg | **16.3 ms** | 118.7 ms | **7.3x** |
-| Signal RTT, p50 | **1.28 ms** | 7.12 ms | **5.6x** |
-| Pong rate (aggregate) | **142.7 k/s** | 26.3 k/s | **5.4x** |
-| Joins/s (churn) | **9,507** | 941 | **10.1x** |
+| Join latency, p50 | **14.5 ms** | 279 ms | **19x** |
+| Join latency, avg | **30.5 ms** | 291 ms | **9.5x** |
+| Signal RTT, p50 | **1.27 ms** | 5.10 ms | **4.0x** |
+| Pong rate | **142.8 k/s** | 36.2 k/s | **3.9x** |
+| Joins/s (churn) | **12,199** | 721 | **16.9x** |
+
+## Memory & CPU (both servers loaded simultaneously)
+
+| Metric | Rust | Go | Ratio |
+|---|---|---|---|
+| Pongs per CPU-second | **~54 k** | ~30 k | **1.8x** |
+| Joins per CPU-second | **~1,470** | ~199 | **7.4x** |
+| Memory per connection | **~330 KB** | ~680 KB | **2.1x less** |
+
+More rooms widen the gap: Go's per-room Redis allocation makes join latency jump from ~111 ms at 20 rooms to ~279 ms at 100 rooms, while the Rust server stays in the 10-15 ms range.
+
+## Multi-node (2-node Rust cluster)
+
+The Rust server is multi-node over Redis (`redis.cluster: true`): rooms are claimed by exactly one node and clients connected to any node transparently relay signaling to the hosting node. Measured with 2 nodes and 200 clients (100 per node) across 100 rooms, so roughly half the joins relay cross-node:
+
+| Metric | 2-node cluster | Single node |
+|---|---|---|
+| Join latency (p50) | **~27 ms** | 14.5 ms |
+| Signal RTT (p50) | **~1.2 ms** | 1.27 ms |
+| Join throughput (aggregate) | **~5.7 k joins/s** | 12.2 k joins/s |
+
+Cross-node joins carry the relay overhead (Redis stream round-trips), so the cluster joins ~1.9x slower than a single node while splitting the aggregate throughput across nodes. RTT stays flat, and the run completed with 0 failures.
 
 ## Reproducing
 
@@ -47,7 +65,7 @@ cargo bench -p lk-server --bench core
 
 cargo build --release -p lk-server --bin livekit-voice --bin load_test
 ./target/release/load_test --target ws://127.0.0.1:7880 \
-  --key devkey --secret secret --clients 200 --rooms 20 --duration 8
+  --key devkey --secret secret --clients 200 --rooms 100 --duration 8
 ```
 
-`load_test` supports `--scenario all|join|rtt|throughput`.
+`load_test` supports `--scenario all|join|rtt|throughput`. Memory/CPU can be measured side by side with `scripts/measure_resources.py`.
