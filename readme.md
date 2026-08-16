@@ -25,36 +25,18 @@ Images are published to GHCR on every `v*` tag.
 
 ## Differences from LiveKit
 
-- **Audio only.** Video tracks are rejected or ignored.
-- **Multi-node over Redis.** Nodes register with a heartbeat, rooms are hosted
-  on exactly one node, and a client connected to any node transparently joins
-  rooms on other nodes via a signaling relay over Redis streams. Enable it with
-  `redis.cluster: true`. This is Rust-native clustering; it does not
-  interoperate with Go `livekit-server` nodes in a mixed cluster, and node
-  failover is basic (rooms are reclaimed by other nodes, in-flight sessions
-  reconnect).
-- **No embedded TURN.** Media uses host candidates (`rtc.ips.includes`).
-- **Full SIP** over the psrpc wire protocol (Redis PubSub, compatible with
-  livekit psrpc v0.7). Configure `redis` and run a `livekit/sip` container on
-  the same Redis: **outbound** calls via the `lk` CLI
-  (`lk sip create-participant ...`) or the Twirp API, and **inbound** calls
-  served by the embedded `IOInfoSIP` service (trunk auth + dispatch rules).
-- **Egress** persists requests for the `livekit/egress` container to pick up;
-  the container does the actual recording.
-- **Webhooks** use the LiveKit-Cloud-style
-  `X-Livekit-Signature: hex(HMAC-SHA256(...))` header instead of the
-  self-hosted JWT scheme.
-- **Metrics** are drop-in compatible with `livekit-server`: same names,
-  labels, and histogram buckets for rooms, participants, connections, tracks,
-  session latency/duration, connection quality, RTCP feedback (NACK/PLI/FIR),
-  packet loss/out-of-order/jitter/RTT, and forwarding latency. See
-  `metrics.rs`.
+- **Audio only** — video tracks are rejected.
+- **Multi-node over Redis** (`redis.cluster: true`); does not interoperate with Go `livekit-server` nodes.
+- **SIP & Egress** interoperate with the `livekit/sip` and `livekit/egress` containers over Redis (psrpc).
+- **Webhooks** signed with `X-Livekit-Signature: hex(HMAC-SHA256(...))`.
+- **Metrics** are drop-in compatible with `livekit-server` (`metrics.rs`).
 
 ## Benchmarks
 
-See [benchmark_livekit_rs_voice.md](benchmark_livekit_rs_voice.md). Against
-the Go `livekit-server`, this server joins roughly 7-10x faster, uses ~2.6x
-less memory per connection, and does 5-23x more work per CPU-second.
+See [benchmark_livekit_rs_voice.md](benchmark_livekit_rs_voice.md).
+Measured on a MacBook Pro (Apple M1, 32 GB RAM, 1 TB SSD): roughly 7-10x
+faster joins, ~2.6x less memory per connection, and 5-23x more work per
+CPU-second than the Go `livekit-server`.
 
 ```bash
 cargo bench -p lk-proto --bench proto
