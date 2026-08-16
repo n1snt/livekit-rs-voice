@@ -74,8 +74,17 @@ pub async fn on_track_published(participant: &Arc<Participant>, track: &Arc<Publ
 
     if let Some(ctx) = room.context() {
         ctx.metrics
-            .tracks_published_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .track_published
+            .with_label_values(&["audio"])
+            .inc();
+        ctx.metrics
+            .track_publish_counter
+            .with_label_values(&["audio", "started"])
+            .inc();
+        ctx.metrics
+            .session_start_time
+            .with_label_values(&["0", "false"])
+            .observe(participant.session_age_ms() as f64);
         ctx.webhook
             .track_published(&room_proto, &publisher_info, &track_info)
             .await;
@@ -113,6 +122,14 @@ pub async fn on_track_unpublished(participant: &Arc<Participant>, track_sid: &st
         .await;
 
     if let Some(ctx) = room.context() {
+        ctx.metrics
+            .track_published
+            .with_label_values(&["audio"])
+            .dec();
+        ctx.metrics
+            .track_publish_counter
+            .with_label_values(&["audio", "ended"])
+            .inc();
         ctx.webhook
             .track_unpublished(&room.to_proto(), &participant.to_proto(), &track.to_proto())
             .await;
@@ -465,9 +482,11 @@ pub async fn end_participant(participant: &Arc<Participant>, reason: lk::Disconn
     room.on_participant_left();
 
     if let Some(ctx) = room.context() {
+        ctx.metrics.participant_total.dec();
         ctx.metrics
-            .participants_total
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            .session_duration
+            .with_label_values(&["0"])
+            .observe(participant.session_age_ms() as f64);
         ctx.webhook.participant_left(&room_proto, &info).await;
     }
 }
@@ -653,6 +672,9 @@ pub async fn run_signal_session(
 
     // Hand the outbound channel to the participant.
     let _old = participant.set_signal_sink(tx);
+    if let Some(ctx) = room.context() {
+        ctx.metrics.connections.inc();
+    }
 
     // Writer task: the join response is written first (so it is always the
     // first frame the client receives), then the participant's outbound
@@ -754,6 +776,9 @@ pub async fn run_signal_session(
     io.close().await;
     if participant.state() != ParticipantState::Disconnected {
         end_participant(&participant, lk::DisconnectReason::SignalClose).await;
+    }
+    if let Some(ctx) = room.context() {
+        ctx.metrics.connections.dec();
     }
     let _ = sink_task.await;
 }
@@ -897,12 +922,11 @@ pub async fn join_room(
         }
     }
     if let Some(ctx) = room.context() {
+        ctx.metrics.participant_total.inc();
         ctx.metrics
-            .participants_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        ctx.metrics
-            .participants_joined_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .participant_join
+            .with_label_values(&["signal_connected"])
+            .inc();
     }
 
     // Notify other participants + webhook.

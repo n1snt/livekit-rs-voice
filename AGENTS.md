@@ -69,6 +69,8 @@ crates/lk-server/   the server:
   ioservice.rs      IOInfoSIP handlers (inbound trunk auth + dispatch rules).
   redis_store.rs    optional Redis store for SIP/egress container interop.
   webhook.rs / server.rs / metrics.rs  webhooks, room manager, metrics.
+                    metrics.rs exposes a drop-in subset of the reference
+                    `livekit-server` Prometheus metrics (same names/labels).
 ```
 
 ## Rules

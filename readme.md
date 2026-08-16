@@ -44,6 +44,11 @@ Images are published to GHCR on every `v*` tag.
 - **Webhooks** use the LiveKit-Cloud-style
   `X-Livekit-Signature: hex(HMAC-SHA256(...))` header instead of the
   self-hosted JWT scheme.
+- **Metrics** are drop-in compatible with `livekit-server` (same names,
+  labels, and histogram buckets: rooms, participants, tracks, session
+  latency/duration, connection quality, RTP packets). A few packet-level
+  series the reference emits are not (no RTCP feedback or forwarding-delay
+  instrumentation in the voice-only media plane); see `metrics.rs`.
 
 ## Benchmarks
 

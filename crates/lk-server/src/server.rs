@@ -1,7 +1,6 @@
 //! Server-level room management and background workers.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,9 +45,9 @@ impl Server {
         let keys = KeyProvider::new(&config);
         let rtc = Arc::new(RtcEngine::new());
         let webhook = WebhookNotifier::from_config(&config);
-        let metrics = Arc::new(Metrics::default());
-        let agent = Arc::new(AgentManager::new_with_keys(keys.clone()));
         let node_id = cluster.node_id.clone();
+        let metrics = Arc::new(Metrics::new(&node_id, "SERVER"));
+        let agent = Arc::new(AgentManager::new_with_keys(keys.clone()));
         let context = Arc::new(RoomContext::new(
             config.clone(),
             rtc,
@@ -87,10 +86,7 @@ impl Server {
                 s.on_room_closed(&weak_room);
             }
         });
-        self.context
-            .metrics
-            .room_total
-            .fetch_add(1, Ordering::Relaxed);
+        self.context.metrics.room_total.inc();
         let mut rooms = self.rooms.lock().unwrap();
         rooms
             .entry(name.to_string())
@@ -184,10 +180,7 @@ impl Server {
 
     pub fn remove_room(&self, name: &str) {
         self.rooms.lock().unwrap().remove(name);
-        self.context
-            .metrics
-            .room_total
-            .fetch_sub(1, Ordering::Relaxed);
+        self.context.metrics.room_total.dec();
     }
 
     fn on_room_closed(&self, room: &std::sync::Weak<Room>) {
@@ -197,6 +190,10 @@ impl Server {
                 .lock()
                 .unwrap()
                 .remove(&room.name);
+            self.context
+                .metrics
+                .room_duration
+                .observe((crate::core::unix_millis() - room.creation_time_ms) as f64 / 1000.0);
             self.remove_room(&room.name);
         }
     }

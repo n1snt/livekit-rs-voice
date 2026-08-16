@@ -380,9 +380,7 @@ impl Room {
             };
             p.send(leave).await;
             if let Some(ctx) = &ctx {
-                ctx.metrics
-                    .participants_total
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.metrics.participant_total.dec();
                 ctx.webhook
                     .participant_left(&room_proto, &p.to_proto())
                     .await;

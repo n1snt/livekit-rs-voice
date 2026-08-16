@@ -25,6 +25,11 @@ always reflects the LiveKit protocol level the server implements.
   inbound calls (trunk authentication, dispatch-rule evaluation, call state).
 - `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules
   through the Twirp API.
+- Drop-in Prometheus metrics matching the reference `livekit-server` names,
+  labels, and histogram buckets (rooms, participants, connections, tracks,
+  session latency/duration, connection-quality score, RTP packets), so
+  existing LiveKit Grafana dashboards work unchanged. See
+  `crates/lk-server/src/metrics.rs` for the emitted set.
 
 ### Fixed
 

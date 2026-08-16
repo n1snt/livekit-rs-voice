@@ -164,6 +164,8 @@ fn bench_audio_level(c: &mut Criterion) {
                 ext_id: None,
                 subscribers: std::sync::Mutex::new(std::collections::HashMap::new()),
                 closed: std::sync::atomic::AtomicBool::new(false),
+                stats: std::sync::Mutex::new(lk_server::media::RtpStats::default()),
+                metrics: std::sync::Arc::new(lk_server::metrics::Metrics::default()),
             });
             p.media
                 .lock()

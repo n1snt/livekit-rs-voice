@@ -167,6 +167,49 @@ pub struct Forwarder {
     pub ext_id: Option<u8>,
     pub subscribers: Mutex<HashMap<String, Arc<TrackLocalStaticRTP>>>,
     pub closed: AtomicBool,
+    /// Per-track RTP statistics used to derive connection quality.
+    pub stats: Mutex<RtpStats>,
+    pub metrics: Arc<crate::metrics::Metrics>,
+}
+
+/// Running RTP loss + jitter estimates for a published track. Loss is derived
+/// from sequence gaps; jitter uses the RFC 3550 interarrival estimator.
+#[derive(Default)]
+pub struct RtpStats {
+    pub packets: u64,
+    pub expected: u64,
+    pub lost: u64,
+    pub jitter_ts: f64,
+    last_seq: Option<u16>,
+    last_rtp_ts: Option<u32>,
+    last_arrival_ms: Option<i64>,
+}
+
+impl RtpStats {
+    /// Feeds one RTP packet into the estimator (RFC 3550 interarrival jitter,
+    /// loss from sequence gaps).
+    fn observe(&mut self, seq: u16, rtp_ts: u32, arrival_ms: i64) {
+        self.packets += 1;
+        if let Some(prev) = self.last_seq {
+            let gap = seq.wrapping_sub(prev);
+            if gap > 0 && gap < 32768 {
+                self.expected += gap as u64;
+                self.lost += (gap - 1) as u64;
+            } else {
+                self.expected += 1;
+            }
+        } else {
+            self.expected = 1;
+        }
+        self.last_seq = Some(seq);
+        if let (Some(prev_ts), Some(prev_arr)) = (self.last_rtp_ts, self.last_arrival_ms) {
+            // Opus runs at 48 kHz; expected inter-arrival delta = elapsed ms * 48.
+            let d = (rtp_ts.wrapping_sub(prev_ts) as i64) - (arrival_ms - prev_arr) * 48;
+            self.jitter_ts += (d.abs() as f64 - self.jitter_ts) / 16.0;
+        }
+        self.last_rtp_ts = Some(rtp_ts);
+        self.last_arrival_ms = Some(arrival_ms);
+    }
 }
 
 impl Forwarder {
@@ -183,6 +226,50 @@ impl Forwarder {
 
     pub fn num_subscribers(&self) -> usize {
         self.subscribers.lock().unwrap().len()
+    }
+
+    /// Feeds one forwarded RTP packet into the loss/jitter estimator.
+    fn observe_rtp(&self, seq: u16, rtp_ts: u32, arrival_ms: i64) {
+        self.stats.lock().unwrap().observe(seq, rtp_ts, arrival_ms);
+    }
+
+    /// Records the current loss/jitter into the quality histograms. Called
+    /// periodically from the forwarding loop.
+    fn record_quality(&self) {
+        let (loss_pct, jitter_ms) = {
+            let st = self.stats.lock().unwrap();
+            let loss_pct = if st.expected > 0 {
+                st.lost as f64 / st.expected as f64 * 100.0
+            } else {
+                0.0
+            };
+            (loss_pct, st.jitter_ts / 48.0)
+        };
+        let score = quality_score(loss_pct, jitter_ms);
+        self.metrics.quality_score.observe(score);
+        self.metrics
+            .quality_rating
+            .observe(quality_rating(score) as f64);
+    }
+}
+
+/// Maps packet loss % and jitter (ms) to a 0-5 connection quality score,
+/// mirroring the reference server's MOS-like model.
+fn quality_score(loss_pct: f64, jitter_ms: f64) -> f64 {
+    (5.0 - 8.0 * (loss_pct / 100.0) - jitter_ms / 50.0).clamp(0.0, 5.0)
+}
+
+/// Maps a score to the `ConnectionQuality` enum int (EXCELLENT=0, GOOD=1,
+/// POOR=2, LOST=3).
+fn quality_rating(score: f64) -> i32 {
+    if score >= 4.0 {
+        0
+    } else if score >= 3.0 {
+        1
+    } else if score >= 1.5 {
+        2
+    } else {
+        3
     }
 }
 
@@ -478,6 +565,11 @@ pub async fn ensure_publisher(
             p.is_publisher.store(true, Ordering::Relaxed);
 
             let ext_id = { p.media.lock().unwrap().publisher_audio_level_ext };
+            let metrics = p
+                .room()
+                .and_then(|r| r.context())
+                .map(|c| c.metrics.clone())
+                .unwrap_or_default();
             let forwarder = Arc::new(Forwarder {
                 track_sid: track.sid.clone(),
                 publisher_sid: p.sid.clone(),
@@ -485,6 +577,8 @@ pub async fn ensure_publisher(
                 ext_id,
                 subscribers: Mutex::new(HashMap::new()),
                 closed: AtomicBool::new(false),
+                stats: Mutex::new(RtpStats::default()),
+                metrics,
             });
             p.media.lock().unwrap().forwarders.insert(track.sid.clone(), forwarder.clone());
 
@@ -516,9 +610,37 @@ pub async fn ensure_publisher(
                     pkt.header.extensions.clear();
                     pkt.header.extensions_padding = 0;
 
+                    let size = pkt.payload.len() as u64 + 12;
+                    fwd.observe_rtp(
+                        pkt.header.sequence_number,
+                        pkt.header.timestamp,
+                        crate::core::unix_millis(),
+                    );
+                    if fwd.stats.lock().unwrap().packets % 100 == 0 {
+                        fwd.record_quality();
+                    }
+                    fwd.metrics
+                        .packet_total
+                        .with_label_values(&["incoming", "initial"])
+                        .inc();
+                    fwd.metrics
+                        .packet_bytes
+                        .with_label_values(&["incoming", "initial"])
+                        .inc_by(size);
+
                     let subs: Vec<Arc<TrackLocalStaticRTP>> = {
                         fwd.subscribers.lock().unwrap().values().cloned().collect()
                     };
+                    if !subs.is_empty() {
+                        fwd.metrics
+                            .packet_total
+                            .with_label_values(&["outgoing", "initial"])
+                            .inc_by(subs.len() as u64);
+                        fwd.metrics
+                            .packet_bytes
+                            .with_label_values(&["outgoing", "initial"])
+                            .inc_by(size * subs.len() as u64);
+                    }
                     for sub in subs {
                         if let Err(e) = sub.write_rtp(&pkt).await {
                             tracing::debug!(track = %fwd.track_sid, "write rtp to subscriber: {e}");
@@ -556,8 +678,16 @@ pub async fn ensure_publisher(
     pc.on_ice_connection_state_change(Box::new(
         move |s: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState| {
             tracing::debug!(sid = %p6.sid, "SERVER publisher ice: {s:?}");
-            if s == webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected {
-                p6.set_state(crate::participant::ParticipantState::Active);
+            if s == webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected
+                && p6.set_state(crate::participant::ParticipantState::Active)
+            {
+                // First time the media plane is up: record session join latency.
+                if let Some(ctx) = p6.room().and_then(|r| r.context()) {
+                    ctx.metrics
+                        .session_join_latency
+                        .with_label_values(&["0"])
+                        .observe(p6.session_age_ms() as f64);
+                }
             }
             Box::pin(async {})
         },
@@ -675,6 +805,18 @@ pub async fn add_subscription(
         media.subscriber_senders.insert(track.sid.clone(), sender);
     }
     forwarder.add_subscriber(&subscriber.sid, track_local);
+    if let Some(room) = subscriber.room() {
+        if let Some(ctx) = room.context() {
+            ctx.metrics
+                .track_subscribed
+                .with_label_values(&["audio"])
+                .inc();
+            ctx.metrics
+                .track_subscribe_counter
+                .with_label_values(&["started", ""])
+                .inc();
+        }
+    }
     let _ = ctx;
 
     request_subscriber_negotiation(subscriber);
@@ -702,6 +844,18 @@ pub async fn remove_subscription(
     }
     if let (Some(sender), Some(pc)) = (sender, pc) {
         let _ = pc.remove_track(&sender).await;
+    }
+    if let Some(room) = subscriber.room() {
+        if let Some(ctx) = room.context() {
+            ctx.metrics
+                .track_subscribed
+                .with_label_values(&["audio"])
+                .dec();
+            ctx.metrics
+                .track_subscribe_counter
+                .with_label_values(&["ended", ""])
+                .inc();
+        }
     }
     request_subscriber_negotiation(subscriber);
     Ok(())
@@ -889,4 +1043,64 @@ pub fn active_speakers(participants: &[Arc<Participant>]) -> Vec<lk::SpeakerInfo
         }
     }
     speakers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_score_maps_loss_and_jitter() {
+        assert_eq!(quality_score(0.0, 0.0), 5.0);
+        assert_eq!(quality_score(0.0, 50.0), 4.0);
+        assert_eq!(quality_score(10.0, 0.0), 4.2);
+        // Never below 0.
+        assert_eq!(quality_score(100.0, 1000.0), 0.0);
+    }
+
+    #[test]
+    fn quality_rating_buckets() {
+        assert_eq!(quality_rating(4.5), 0); // EXCELLENT
+        assert_eq!(quality_rating(3.5), 1); // GOOD
+        assert_eq!(quality_rating(2.0), 2); // POOR
+        assert_eq!(quality_rating(1.0), 3); // LOST
+    }
+
+    #[test]
+    fn rtp_stats_counts_sequence_gaps() {
+        let mut st = RtpStats::default();
+        for seq in 0u16..=99 {
+            st.observe(seq, seq as u32, seq as i64);
+        }
+        assert_eq!(st.packets, 100);
+        assert_eq!(st.lost, 0);
+        assert_eq!(st.expected, 100);
+
+        // A hole (packet 42 missing) counts as one lost packet.
+        let mut st = RtpStats::default();
+        for seq in 0u16..=100 {
+            if seq != 42 {
+                st.observe(seq, seq as u32, seq as i64);
+            }
+        }
+        assert_eq!(st.lost, 1);
+    }
+
+    #[test]
+    fn rtp_stats_estimates_jitter() {
+        let mut st = RtpStats::default();
+        // Constant rate: 48 timestamp units per ms arrival; no jitter.
+        for i in 0..64 {
+            st.observe(i as u16, (i * 48) as u32, i as i64);
+        }
+        assert!(st.jitter_ts.abs() < 1.0);
+
+        // One packet arrives 2 ms late -> jitter grows.
+        let mut st = RtpStats::default();
+        for i in 0..64 {
+            let late = if i == 30 { i + 2 } else { i };
+            st.observe(i as u16, (i * 48) as u32, late as i64);
+        }
+        assert!(st.jitter_ts > 1.0);
+    }
 }

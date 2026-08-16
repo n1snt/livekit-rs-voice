@@ -162,6 +162,11 @@ impl Participant {
         self.state() == ParticipantState::Disconnected
     }
 
+    /// Milliseconds since the participant session started.
+    pub fn session_age_ms(&self) -> i64 {
+        unix_millis() - self.joined_at_ms
+    }
+
     pub fn can_subscribe(&self) -> bool {
         self.permission.lock().unwrap().can_subscribe
     }
