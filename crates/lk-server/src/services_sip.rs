@@ -710,44 +710,60 @@ pub async fn egress_service(
             if r.room_name.is_empty() {
                 return Err(TwirpError::invalid_argument("room_name is required"));
             }
-            let info = new_egress_info(
+            let info = start_egress(
+                server,
                 &r.room_name,
-                lk::egress_info::Request::RoomComposite(r.clone()),
-            );
+                lk_proto::rpc::start_egress_request::Request::RoomComposite(r.clone()),
+            )
+            .await?;
             store.store_egress(&info).await.map_err(twirp_internal)?;
             out(&info, format)
         }
         "StartEgress" => {
             ensure_record(req)?;
             let r: lk::StartEgressRequest = parse_body(body, format)?;
-            let info = new_egress_info(&r.room_name, lk::egress_info::Request::Egress(r.clone()));
+            let info = start_egress(
+                server,
+                &r.room_name,
+                lk_proto::rpc::start_egress_request::Request::Egress(r.clone()),
+            )
+            .await?;
             store.store_egress(&info).await.map_err(twirp_internal)?;
             out(&info, format)
         }
         "StartTrackEgress" => {
             ensure_record(req)?;
             let r: lk::TrackEgressRequest = parse_body(body, format)?;
-            let info = new_egress_info("", lk::egress_info::Request::Track(r.clone()));
+            let info = start_egress(
+                server,
+                "",
+                lk_proto::rpc::start_egress_request::Request::Track(r.clone()),
+            )
+            .await?;
             store.store_egress(&info).await.map_err(twirp_internal)?;
             out(&info, format)
         }
         "StartTrackCompositeEgress" => {
             ensure_record(req)?;
             let r: lk::TrackCompositeEgressRequest = parse_body(body, format)?;
-            let info = new_egress_info(
+            let info = start_egress(
+                server,
                 &r.room_name,
-                lk::egress_info::Request::TrackComposite(r.clone()),
-            );
+                lk_proto::rpc::start_egress_request::Request::TrackComposite(r.clone()),
+            )
+            .await?;
             store.store_egress(&info).await.map_err(twirp_internal)?;
             out(&info, format)
         }
         "StartParticipantEgress" => {
             ensure_record(req)?;
             let r: lk::ParticipantEgressRequest = parse_body(body, format)?;
-            let info = new_egress_info(
+            let info = start_egress(
+                server,
                 &r.room_name,
-                lk::egress_info::Request::Participant(r.clone()),
-            );
+                lk_proto::rpc::start_egress_request::Request::Participant(r.clone()),
+            )
+            .await?;
             store.store_egress(&info).await.map_err(twirp_internal)?;
             out(&info, format)
         }
@@ -776,12 +792,17 @@ pub async fn egress_service(
         }
         "StopEgress" => {
             let r: lk::StopEgressRequest = parse_body(body, format)?;
-            let mut info = store
-                .load_egress(&r.egress_id)
+            if r.egress_id.is_empty() {
+                return Err(TwirpError::invalid_argument("egress_id is required"));
+            }
+            let client = server
+                .egress_client()
                 .await
-                .map_err(twirp_internal)?
-                .ok_or_else(|| TwirpError::not_found("egress not found"))?;
-            info.status = lk::EgressStatus::EgressEnding as i32;
+                .map_err(TwirpError::failed_precondition)?;
+            let info = client
+                .stop_egress(&r.egress_id, &r)
+                .await
+                .map_err(psrpc_to_twirp)?;
             store.store_egress(&info).await.map_err(twirp_internal)?;
             out(&info, format)
         }
@@ -792,14 +813,23 @@ pub async fn egress_service(
     }
 }
 
-fn new_egress_info(room_name: &str, request: lk::egress_info::Request) -> lk::EgressInfo {
-    lk::EgressInfo {
-        egress_id: crate::core::generate_id("EG_"),
+/// Publishes a start-egress request to a `livekit-egress` recorder over the
+/// psrpc bus and returns the recorder's `EgressInfo`.
+async fn start_egress(
+    server: &Arc<Server>,
+    room_name: &str,
+    request: lk_proto::rpc::start_egress_request::Request,
+) -> Result<lk::EgressInfo, TwirpError> {
+    let egress_id = crate::core::generate_id("EG_");
+    let ireq = lk_proto::rpc::StartEgressRequest {
+        egress_id: egress_id.clone(),
         room_name: room_name.to_string(),
-        status: lk::EgressStatus::EgressStarting as i32,
-        started_at: unix_seconds(),
-        updated_at: unix_seconds(),
         request: Some(request),
         ..Default::default()
-    }
+    };
+    let client = server
+        .egress_client()
+        .await
+        .map_err(TwirpError::failed_precondition)?;
+    client.start_egress(&ireq).await.map_err(psrpc_to_twirp)
 }

@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package rpc;
+
+option go_package = "github.com/livekit/protocol/rpc";
+
+// EgressInternal/EgressHandler RPC payloads. Field numbers match
+// livekit/protocol (protobufs/rpc/egress.proto) so these serialize
+// identically on the psrpc wire. Service/method definitions and the psrpc
+// custom options are omitted: the RPC client/server are implemented by hand
+// in lk-server's psrpc module.
+
+import "livekit_egress.proto";
+
+message StartEgressRequest {
+  // request metadata
+  string egress_id = 1;
+
+  // request
+  oneof request {
+    livekit.StartEgressRequest egress = 16;
+    livekit.ExportReplayRequest replay = 17;
+
+    // --- deprecated ---
+    livekit.RoomCompositeEgressRequest room_composite = 5;
+    livekit.WebEgressRequest web = 11;
+    livekit.ParticipantEgressRequest participant = 13;
+    livekit.TrackCompositeEgressRequest track_composite = 6;
+    livekit.TrackEgressRequest track = 7;
+  }
+
+  // connection info
+  string room_id = 3;
+  string room_name = 18;
+  string token = 8;
+  string ws_url = 9;
+
+  // cloud only
+  bool cloud_backup_enabled = 10;
+  double estimated_cpu = 14;
+  int32 retry_count = 15;
+}
+
+message ListActiveEgressRequest {}
+
+message ListActiveEgressResponse {
+  repeated string egress_ids = 1;
+}
+
+message EgressReadyRequest {
+  string egress_id = 1;
+}
+
+message EgressReadyResponse {
+  int64 start_at = 1;    // wallclock unix timestamp (nanoseconds)
+  int64 duration_ms = 2; // how long to record
+}

@@ -24,6 +24,7 @@ pub struct Server {
     pub cluster: Arc<crate::cluster::Cluster>,
     pub sip: tokio::sync::OnceCell<Arc<crate::psrpc::SipInternalClient>>,
     pub sip_io: tokio::sync::OnceCell<Arc<crate::psrpc::SipIoServer>>,
+    pub egress: tokio::sync::OnceCell<Arc<crate::psrpc::EgressClient>>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
 }
 
@@ -67,6 +68,7 @@ impl Server {
             cluster,
             sip: tokio::sync::OnceCell::new(),
             sip_io: tokio::sync::OnceCell::new(),
+            egress: tokio::sync::OnceCell::new(),
             rooms: Mutex::new(HashMap::new()),
         })
     }
@@ -169,9 +171,48 @@ impl Server {
         ] {
             io.register(method, handlers.clone()).await?;
         }
+        // IOInfo egress methods so the livekit-egress recorder can report state.
+        let io_info = crate::psrpc::PsrpcServer::new(bus.clone(), "IOInfo").await?;
+        let egress_handlers: Arc<dyn crate::psrpc::IoHandler> =
+            Arc::new(crate::ioservice::EgressIoHandlers {
+                store: self.store.clone(),
+            });
+        for method in ["CreateEgress", "UpdateEgress"] {
+            io_info.register(method, egress_handlers.clone()).await?;
+        }
         let _ = self.sip_io.set(io);
         tracing::info!("SIP IO service started (psrpc)");
         Ok(())
+    }
+
+    /// Lazily builds the psrpc client used to reach a `livekit-egress`
+    /// recorder. Egress requires Redis (the shared psrpc bus) plus a recorder.
+    pub async fn egress_client(&self) -> Result<Arc<crate::psrpc::EgressClient>, String> {
+        if let Some(client) = self.egress.get() {
+            return Ok(client.clone());
+        }
+        if !self.config.redis.is_configured() {
+            return Err(
+                "egress requires redis (psrpc bus) and a livekit-egress recorder".to_string(),
+            );
+        }
+        self.egress_client_with(Arc::new(crate::psrpc::RedisBus::new(
+            &crate::psrpc::redis_config(&self.config),
+        )))
+        .await
+    }
+
+    /// Builds (or returns the cached) egress client over the given bus.
+    pub async fn egress_client_with(
+        &self,
+        bus: Arc<dyn crate::psrpc::PsrpcBus>,
+    ) -> Result<Arc<crate::psrpc::EgressClient>, String> {
+        if let Some(client) = self.egress.get() {
+            return Ok(client.clone());
+        }
+        let client = crate::psrpc::EgressClient::new(bus).await?;
+        let _ = self.egress.set(client.clone());
+        Ok(client)
     }
 
     pub fn list_rooms(&self) -> Vec<Arc<Room>> {

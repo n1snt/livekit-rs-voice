@@ -36,6 +36,26 @@ pub struct SipIoHandlers {
     pub store: Arc<Store>,
 }
 
+/// Handlers for the `IOInfo` egress methods (`CreateEgress`, `UpdateEgress`),
+/// which the `livekit-egress` recorder calls to report state back.
+pub struct EgressIoHandlers {
+    pub store: Arc<Store>,
+}
+
+#[async_trait::async_trait]
+impl IoHandler for EgressIoHandlers {
+    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+        match method {
+            "CreateEgress" | "UpdateEgress" => {
+                let info = lk::EgressInfo::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+                self.store.store_egress(&info).await?;
+                Ok(lk_proto::well_known::Empty {}.encode_to_vec())
+            }
+            _ => Err(format!("unknown IOInfo method: {method}")),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl IoHandler for SipIoHandlers {
     async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {

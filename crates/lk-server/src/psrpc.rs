@@ -13,6 +13,7 @@ pub use lk_psrpc::{
 use std::sync::Arc;
 use std::time::Duration;
 
+use lk_proto::livekit as lk;
 use lk_proto::rpc;
 use prost::Message as _;
 
@@ -118,5 +119,43 @@ impl SipIoServer {
 
     pub async fn register(&self, method: &str, handler: Arc<dyn IoHandler>) -> Result<(), String> {
         self.inner.register(method, handler).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EgressClient (egress dispatch to livekit-egress)
+// ---------------------------------------------------------------------------
+
+/// psrpc clients for the egress services: `EgressInternal.StartEgress` reaches
+/// a `livekit-egress` recorder, and `EgressHandler.StopEgress` (topic =
+/// egress id) stops an active recording.
+pub struct EgressClient {
+    internal: Arc<PsrpcClient>,
+    handler: Arc<PsrpcClient>,
+}
+
+impl EgressClient {
+    pub async fn new(bus: Arc<dyn PsrpcBus>) -> Result<Arc<Self>, String> {
+        Ok(Arc::new(EgressClient {
+            internal: PsrpcClient::new(bus.clone(), "EgressInternal").await?,
+            handler: PsrpcClient::new(bus, "EgressHandler").await?,
+        }))
+    }
+
+    pub async fn start_egress(
+        &self,
+        req: &rpc::StartEgressRequest,
+    ) -> Result<lk::EgressInfo, PsrpcError> {
+        let raw = self.internal.request("StartEgress", "", req).await?;
+        lk::EgressInfo::decode(raw.as_slice()).map_err(PsrpcError::Malformed)
+    }
+
+    pub async fn stop_egress(
+        &self,
+        egress_id: &str,
+        req: &lk::StopEgressRequest,
+    ) -> Result<lk::EgressInfo, PsrpcError> {
+        let raw = self.handler.request("StopEgress", egress_id, req).await?;
+        lk::EgressInfo::decode(raw.as_slice()).map_err(PsrpcError::Malformed)
     }
 }
