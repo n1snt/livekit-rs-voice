@@ -2,9 +2,14 @@
 #
 #   git tag v1.13.5 && git push origin v1.13.5
 #
+# Each architecture is built natively (no QEMU) on a matching runner, pushed
+# under a per-arch tag, then combined into multi-arch manifests:
+#
 # Images:
 #   n1snt/livekit-rs-voice:1.13.5 and :latest
+#   n1snt/livekit-rs-egress:1.13.5 and :latest
 #   ghcr.io/<owner>/livekit-rs-voice:1.13.5 and :latest
+#   ghcr.io/<owner>/livekit-rs-egress:1.13.5 and :latest
 name: Release
 
 on:
@@ -15,17 +20,22 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  docker:
-    name: Build & publish image
-    runs-on: ubuntu-latest
+  build:
+    name: Build & push image (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-latest
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -44,7 +54,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract metadata (livekit-voice)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -52,32 +62,51 @@ jobs:
             n1snt/livekit-rs-voice
             ghcr.io/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=${{ matrix.platform }}
 
-      - name: Build and push
+      - name: Build and push livekit-voice
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-  docker-egress:
-    name: Build & publish egress image
+      - name: Extract metadata (livekit-egress)
+        id: meta-egress
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            n1snt/livekit-rs-egress
+            ghcr.io/${{ env.IMAGE_NAME }}-egress
+          tags: |
+            type=raw,value=${{ matrix.platform }}
+
+      - name: Build and push livekit-egress
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.egress
+          platforms: linux/${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta-egress.outputs.tags }}
+          labels: ${{ steps.meta-egress.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  manifest:
+    name: Create multi-arch manifest
+    needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Compute version tag
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -93,23 +122,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            n1snt/livekit-rs-egress
-            ghcr.io/${{ env.IMAGE_NAME }}-egress
-          tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.egress
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Create multi-arch manifests
+        run: |
+          docker buildx imagetools create \
+            -t n1snt/livekit-rs-voice:${{ steps.version.outputs.tag }} \
+            -t n1snt/livekit-rs-voice:latest \
+            n1snt/livekit-rs-voice:amd64 \
+            n1snt/livekit-rs-voice:arm64
+          docker buildx imagetools create \
+            -t n1snt/livekit-rs-egress:${{ steps.version.outputs.tag }} \
+            -t n1snt/livekit-rs-egress:latest \
+            n1snt/livekit-rs-egress:amd64 \
+            n1snt/livekit-rs-egress:arm64
+          docker buildx imagetools create \
+            -t ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }} \
+            -t ghcr.io/${{ env.IMAGE_NAME }}:latest \
+            ghcr.io/${{ env.IMAGE_NAME }}:amd64 \
+            ghcr.io/${{ env.IMAGE_NAME }}:arm64
+          docker buildx imagetools create \
+            -t ghcr.io/${{ env.IMAGE_NAME }}-egress:${{ steps.version.outputs.tag }} \
+            -t ghcr.io/${{ env.IMAGE_NAME }}-egress:latest \
+            ghcr.io/${{ env.IMAGE_NAME }}-egress:amd64 \
+            ghcr.io/${{ env.IMAGE_NAME }}-egress:arm64
