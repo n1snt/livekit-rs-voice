@@ -24,16 +24,22 @@ struct Inner {
 }
 
 impl WebhookNotifier {
-    /// Builds the notifier from config. Returns a disabled notifier when no
-    /// webhook URLs are configured.
-    pub fn from_config(config: &Config) -> Self {
+    /// Builds the notifier from config, resolving the API secret for the
+    /// configured webhook `api_key` (the reference signs with the API secret,
+    /// not the key string). Returns a disabled notifier when no webhook URLs
+    /// are configured.
+    pub fn from_config(config: &Config, keys: &crate::auth::KeyProvider) -> Self {
         if config.webhook.urls.is_empty() {
             return Self { inner: None };
         }
+        let secret = keys
+            .get_secret(&config.webhook.api_key)
+            .map(str::to_string)
+            .unwrap_or_else(|| config.webhook.api_key.clone());
         WebhookNotifier {
             inner: Some(Arc::new(Mutex::new(Inner {
                 urls: config.webhook.urls.clone(),
-                secret: config.webhook.api_key.clone(),
+                secret,
                 client: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .build()

@@ -9,6 +9,39 @@ Releases are tagged `vX.Y.Z` and published as multi-arch (linux/amd64 and linux/
 
 Versions mirror [livekit-server](https://github.com/livekit/livekit) releases: `1.13.5` means "wire/protocol level of livekit-server 1.13.5". We bump the version to match whenever we pick up upstream protocol patches, so the version always reflects the LiveKit protocol level the server implements.
 
+## [Unreleased]
+
+### Added
+
+- Benchmark harness for the recorder (`scripts/bench/bench_egress.sh`): runs the Rust and Go egresses against the same real-WebRTC workload, samples egress memory/CPU (process `ps` and Docker cgroup), and reports idle + recording + multi-stream numbers.
+- `send_audio` publisher example and a new Go SDK publisher (`scripts/bench/go-publisher/`) so the Go stack can be driven by its native pion client.
+
+### Changed
+
+- `docs/benchmark_livekit_rs_egress.md` now measures both recorders end-to-end on the same host: the Go `livekit/egress` numbers are real recordings (~14% CPU and ~61 MB process RSS vs the Rust ~0.7% and ~12 MB while recording), not idle-only estimates.
+- Benchmark docs moved to `docs/` (`docs/benchmark_livekit_rs_voice.md`, `docs/benchmark_livekit_rs_egress.md`).
+
+### Fixed
+
+- Egress websocket connect now times out (10 s) instead of hanging the recording task forever; recording start/end are logged.
+- `send_audio` example: handles the Go server's `RefreshToken`/`ParticipantUpdate` interleaving and the `fastPublish` flow, so it works against both the Rust and Go servers.
+- psrpc Redis bus: pub/sub subscriptions and the publish connection now reconnect automatically when dropped (e.g. a Redis restart or network blip), instead of silently dying and making subsequent RPCs (egress/SIP dispatch) time out forever. The server also keeps the `IOInfo` psrpc server alive for its full lifetime.
+- `livekit-rs-voice:local` / `livekit-rs-egress:local` dev images now include the egress-dispatch and `IOInfo` code (they were built from source predating it).
+
+### Compatibility fixes found by the wire-compat test suite
+
+- Hidden participants no longer leak into `JoinResponse.other_participants`.
+- Oversized signal frames now close the websocket with code 1009 (policy violation), matching the reference, instead of 1000.
+- CORS headers (`Access-Control-Allow-Origin` echo) are now applied to API responses (the middleware was not wrapping the routes).
+- Webhooks are signed with the API **secret** for the configured `webhook.api_key` (hex `HMAC-SHA256(secret, body)`), matching the reference — previously the key string was used.
+- `CreateRoom`, `UpdateParticipant`, and `UpdateRoomMetadata` now enforce `limit.max_metadata` / `max_attributes` / `max_room_name_length`, returning `invalid_argument` over the limit.
+- `MutePublishedTrack` returns the updated (muted) `TrackInfo`; the mute was applied asynchronously so the response carried the stale state.
+- Egress `EgressInfo` now populates `file_results` (plus `ended_at` and the file size), which real clients read, instead of only the deprecated `file` oneof.
+
+### Added
+
+- Wire-compatibility integration test suite mirroring the reference `livekit-server` / `livekit/egress` tests: `crates/lk-server/tests/wire_compat_auth.rs` (token rejection + Twirp permission matrix), `wire_compat_signaling.rs` (join contract, ping, mute, leave, hidden/duplicate participants, attributes, message-size limit), `wire_compat_roomservice.rs` (RoomService lifecycle, not_found/invalid_argument, CORS), `wire_compat_webhook.rs` (lifecycle events + HMAC signature), and `crates/lk-egress/tests/recording.rs` (MP3, multi-track mixing, EGRESS_COMPLETE state reporting).
+
 ## [1.13.5] - 2026-08-16
 
 ### Added
@@ -21,14 +54,14 @@ Versions mirror [livekit-server](https://github.com/livekit/livekit) releases: `
 - Webhooks (`room_started`, `room_finished`, `participant_joined`, `participant_left`, `track_published`, `track_unpublished`) signed with `X-Livekit-Signature: hex(HMAC-SHA256(...))`.
 - Prometheus `/metrics` on a dedicated port.
 - Optional Redis store for SIP/egress container interop.
-- Benchmarks: criterion micro-benchmarks + `load_test` harness, and `benchmark_livekit_rs_voice.md` comparing against the Go server.
+- Benchmarks: criterion micro-benchmarks + `load_test` harness, and `docs/benchmark_livekit_rs_voice.md` comparing against the Go server.
 - TURN relay (RFC 8489/5766) with JoinResponse ICE server credentials.
 - Full SIP over the psrpc wire protocol (v0.7 Redis PubSub): outbound `CreateSIPParticipant` / `TransferSIPParticipant` reach a real `livekit/sip` container, and the embedded `IOInfoSIP` service serves inbound calls (trunk authentication, dispatch-rule evaluation, call state).
 - `lk` CLI: place outbound SIP calls and manage SIP trunks / dispatch rules through the Twirp API.
 - Drop-in Prometheus metrics matching the reference `livekit-server` names, labels, and histogram buckets: rooms, participants, connections, tracks, session latency/duration, connection-quality score, RTP packets, RTCP feedback (NACK/PLI/FIR), per-stream packet loss/out-of-order/jitter/RTT, and forwarding latency (from RTCP sender reports). Existing LiveKit Grafana dashboards work unchanged. See `crates/lk-server/src/metrics.rs`.
 - Multi-node clustering over Redis (`redis.cluster: true`).
 - `livekit-egress`: a voice-only recorder (WAV/MP3) hosted in this monorepo, dispatched over the psrpc bus and reporting state back via `IOInfo`.
-- `benchmark_livekit_rs_egress.md`: recorder footprint (0.7% CPU / 11 MB while recording, 67.6 MB image vs the Go egress's 4.76 GB).
+- `docs/benchmark_livekit_rs_egress.md`: recorder footprint measured end-to-end against a real Go `livekit/egress` recording (both stacks in Docker: ~2-3 MB anon RSS / ~2% CPU vs ~38 MB / ~10% while recording, 67.6 MB image vs the Go egress's 4.76 GB).
 
 ### Fixed
 

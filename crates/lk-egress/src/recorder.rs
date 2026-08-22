@@ -141,30 +141,36 @@ fn append_bytes(path: &str, bytes: &[u8]) -> Result<(), String> {
     f.write_all(bytes).map_err(|e| format!("write {path}: {e}"))
 }
 
-/// Builds an `EgressInfo` reflecting a finished recording.
+/// Builds an `EgressInfo` reflecting a finished recording. Populates both the
+/// non-deprecated `file_results` and the legacy `result` oneof (clients read
+/// `file_results`, matching the reference).
 pub fn finished_info(
     egress_id: &str,
     room_name: &str,
     path: &str,
     request: lk::egress_info::Request,
     frames: u64,
+    size: u64,
 ) -> lk::EgressInfo {
     let now = crate::now_secs();
+    let file = lk::FileInfo {
+        filename: path.to_string(),
+        started_at: now,
+        ended_at: now,
+        duration: (frames * 20) as i64,
+        location: String::new(),
+        size: size as i64,
+    };
     lk::EgressInfo {
         egress_id: egress_id.to_string(),
         room_name: room_name.to_string(),
         status: lk::EgressStatus::EgressComplete as i32,
         started_at: now,
+        ended_at: now,
         updated_at: now,
         request: Some(request),
-        result: Some(lk::egress_info::Result::File(lk::FileInfo {
-            filename: path.to_string(),
-            started_at: now,
-            ended_at: now,
-            duration: (frames * 20) as i64,
-            location: String::new(),
-            size: 0,
-        })),
+        result: Some(lk::egress_info::Result::File(file.clone())),
+        file_results: vec![file],
         ..Default::default()
     }
 }

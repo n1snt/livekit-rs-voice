@@ -37,6 +37,32 @@ fn ensure_list(req: &Req) -> Result<(), TwirpError> {
     }
 }
 
+/// Reference `ErrMetadataExceedsLimits`: metadata over the configured limit is
+/// an `invalid_argument`.
+fn validate_metadata(config: &crate::config::Config, metadata: &str) -> Result<(), TwirpError> {
+    if metadata.len() > config.limit.max_metadata {
+        Err(TwirpError::invalid_argument("metadata size exceeds limits"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Reference `ErrAttributeExceedsLimits`: the total attribute size (keys +
+/// values) over the configured limit is an `invalid_argument`.
+fn validate_attributes(
+    config: &crate::config::Config,
+    attributes: &std::collections::BTreeMap<String, String>,
+) -> Result<(), TwirpError> {
+    let total: usize = attributes.iter().map(|(k, v)| k.len() + v.len()).sum();
+    if total > config.limit.max_attributes {
+        Err(TwirpError::invalid_argument(
+            "attribute size exceeds limits",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Dispatches a `livekit.RoomService` RPC.
 pub fn room_service(
     server: &Arc<Server>,
@@ -54,8 +80,15 @@ pub fn room_service(
             let name = if r.name.is_empty() {
                 return Err(TwirpError::invalid_argument("room name is required"));
             } else {
+                if r.name.len() > server.config.limit.max_room_name_length {
+                    return Err(TwirpError::invalid_argument(format!(
+                        "room name length exceeds limits: max length {}",
+                        server.config.limit.max_room_name_length
+                    )));
+                }
                 r.name
             };
+            validate_metadata(&server.config, &r.metadata)?;
             let existed = server.get_room(&name).is_some();
             let room = server.get_or_create_room(&name);
             if !r.metadata.is_empty() {
@@ -176,16 +209,21 @@ pub fn room_service(
             let track = participant
                 .get_track(&r.track_sid)
                 .ok_or_else(|| TwirpError::not_found("track not found"))?;
+            // Apply the mute synchronously so the returned TrackInfo reflects
+            // the new state (the reference returns the updated track).
+            track.set_muted(r.muted);
+            let track_info = track.to_proto();
             let room2 = room.clone();
             let p = participant.clone();
             let sid = r.track_sid.clone();
+            let muted = r.muted;
             tokio::spawn(async move {
-                crate::signal::set_track_muted(&p, &sid, r.muted, true).await;
+                crate::signal::set_track_muted(&p, &sid, muted, true).await;
                 let _ = room2;
             });
             write(
                 &lk::MuteRoomTrackResponse {
-                    track: Some(track.to_proto()),
+                    track: Some(track_info),
                 },
                 format,
             )
@@ -199,6 +237,8 @@ pub fn room_service(
             let participant = room
                 .get_participant_by_identity(&r.identity)
                 .ok_or_else(|| TwirpError::not_found("participant not found"))?;
+            validate_metadata(&server.config, &r.metadata)?;
+            validate_attributes(&server.config, &r.attributes)?;
             let mut changed = participant.update_metadata(
                 r.metadata.clone(),
                 if r.name.is_empty() {
@@ -261,6 +301,7 @@ pub fn room_service(
         "UpdateRoomMetadata" => {
             let r: lk::UpdateRoomMetadataRequest = parse(body, format)?;
             ensure_admin(req, &r.room)?;
+            validate_metadata(&server.config, &r.metadata)?;
             let room = server
                 .get_room(&r.room)
                 .ok_or_else(|| TwirpError::not_found("room not found"))?;

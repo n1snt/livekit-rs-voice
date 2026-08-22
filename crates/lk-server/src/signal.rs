@@ -2,6 +2,7 @@
 //! (protobuf-binary default, JSON on text frames), participant request
 //! handling, and room lifecycle callbacks used by the media plane.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -594,7 +595,9 @@ pub fn participant_kind_from_token(token: &auth::VerifiedToken) -> ParticipantKi
 
 struct WsIoReader {
     stream: futures_util::stream::SplitStream<WebSocket>,
-    mode: Arc<std::sync::Mutex<bool>>, // false = binary, true = json
+    mode: Arc<std::sync::Mutex<bool>>,
+    close_code: Arc<std::sync::atomic::AtomicU16>,
+    max_frame_size: usize,
 }
 
 #[async_trait::async_trait]
@@ -607,14 +610,30 @@ impl SignalIoReader for WsIoReader {
             )
             .await
             .ok()??;
-            let frame = frame.ok()?;
+            let frame = match frame {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(error = %e, "rtc ws read error");
+                    return None;
+                }
+            };
             match frame {
                 Message::Binary(bytes) => {
                     *self.mode.lock().unwrap() = false;
+                    // The reference closes with 1009 (policy violation) when a
+                    // signal frame exceeds the configured size limit.
+                    if bytes.len() > self.max_frame_size {
+                        self.close_code.store(1009, Ordering::Relaxed);
+                        return None;
+                    }
                     return lk::SignalRequest::decode(bytes.as_ref()).ok();
                 }
                 Message::Text(text) => {
                     *self.mode.lock().unwrap() = true;
+                    if text.len() > self.max_frame_size {
+                        self.close_code.store(1009, Ordering::Relaxed);
+                        return None;
+                    }
                     return serde_json::from_str::<lk::SignalRequest>(&text).ok();
                 }
                 Message::Close(_) => return None,
@@ -627,6 +646,7 @@ impl SignalIoReader for WsIoReader {
 struct WsIoWriter {
     sink: futures_util::stream::SplitSink<WebSocket, Message>,
     mode: Arc<std::sync::Mutex<bool>>,
+    close_code: Arc<std::sync::atomic::AtomicU16>,
 }
 
 #[async_trait::async_trait]
@@ -637,26 +657,36 @@ impl SignalIoWriter for WsIoWriter {
     }
 
     async fn close(&mut self) {
+        let code = self.close_code.load(Ordering::Relaxed);
         let _ = self
             .sink
             .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                code: 1000,
+                code,
                 reason: "".into(),
             })))
             .await;
     }
 }
 
-/// Builds a websocket-backed signal transport.
-pub fn ws_io(socket: WebSocket) -> SignalIo {
+/// Builds a websocket-backed signal transport. `max_frame_size` is enforced
+/// here (the reference closes with 1009 when a signal frame exceeds the
+/// configured size limit).
+pub fn ws_io(socket: WebSocket, max_frame_size: usize) -> SignalIo {
     let (sink, stream) = socket.split();
     let mode = Arc::new(std::sync::Mutex::new(false));
+    let close_code = Arc::new(std::sync::atomic::AtomicU16::new(1000));
     SignalIo::new(
         Box::new(WsIoReader {
             stream,
             mode: mode.clone(),
+            close_code: close_code.clone(),
+            max_frame_size,
         }),
-        Box::new(WsIoWriter { sink, mode }),
+        Box::new(WsIoWriter {
+            sink,
+            mode,
+            close_code,
+        }),
     )
 }
 
@@ -957,7 +987,7 @@ pub fn build_join_response(
     let others = room
         .participants()
         .into_iter()
-        .filter(|p| p.sid != participant.sid)
+        .filter(|p| p.sid != participant.sid && !p.permission.lock().unwrap().hidden)
         .map(|p| p.to_proto())
         .collect();
 

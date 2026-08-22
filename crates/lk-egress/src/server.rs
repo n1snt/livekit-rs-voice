@@ -167,6 +167,7 @@ impl IoHandler for StopHandler {
 #[async_trait::async_trait]
 impl IoHandler for Handlers {
     async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+        tracing::debug!(method, len = raw.len(), "psrpc request");
         match method {
             "StartEgress" => {
                 let req =
@@ -259,6 +260,7 @@ async fn run_one(
         "wav"
     };
     let path = format!("{}/{egress_id}.{ext}", conf.output_dir);
+    tracing::info!(egress_id, room, "starting recording");
     let audio = client::connect(
         &conf.api_key,
         &conf.api_secret,
@@ -267,13 +269,15 @@ async fn run_one(
         &format!("egress_{egress_id}"),
     )
     .await?;
+    tracing::info!(egress_id, room, "connected; recording");
     let frames =
         recorder::run_recording(audio, &path, format, conf.mp3_bitrate, stop_rx.clone()).await?;
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let request = lk::egress_info::Request::RoomComposite(lk::RoomCompositeEgressRequest {
         room_name: room.to_string(),
         ..Default::default()
     });
-    let info = recorder::finished_info(egress_id, room, &path, request, frames);
+    let info = recorder::finished_info(egress_id, room, &path, request, frames, size);
     let _ = ctx.io.update_egress(&info).await;
     ctx.infos
         .lock()

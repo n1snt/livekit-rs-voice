@@ -309,10 +309,23 @@ async fn rtc_ws_impl(
         .map(|v| v.trim().trim_start_matches("Bearer ").to_string())
         .or_else(|| params.get("access_token").cloned())
         .unwrap_or_default();
+    let signal_message_limit = max_signal_message_size(&server);
 
-    ws.max_message_size(max_signal_message_size(&server))
+    // Cap the raw frame at 64 MiB at the transport layer; the configured
+    // `signal_message_size_limit` is enforced in the signal reader (which closes
+    // with 1009, matching the reference).
+    ws.max_message_size(64 * 1024 * 1024)
         .on_upgrade(move |socket| async move {
-            if let Err(e) = run_rtc_session(socket, server, token, raw_token, session).await {
+            if let Err(e) = run_rtc_session(
+                socket,
+                server,
+                token,
+                raw_token,
+                session,
+                signal_message_limit,
+            )
+            .await
+            {
                 tracing::warn!("rtc session ended: {e}");
             }
         })
@@ -396,13 +409,21 @@ async fn run_rtc_session(
     token: VerifiedToken,
     raw_token: String,
     params: SessionParams,
+    signal_message_limit: usize,
 ) -> Result<(), String> {
     let kind = signal::participant_kind_from_token(&token);
 
     // Route the room: run locally, or relay to the hosting node.
     match server.cluster.route_room(&token.video.room).await {
         crate::cluster::Routing::Local => {
-            signal::run_session_with_io(signal::ws_io(socket), &server, token, params, kind).await
+            signal::run_session_with_io(
+                signal::ws_io(socket, signal_message_limit),
+                &server,
+                token,
+                params,
+                kind,
+            )
+            .await
         }
         crate::cluster::Routing::Remote(target_node) => {
             crate::cluster::run_relay_client(socket, &server, &raw_token, params, &target_node)
@@ -462,8 +483,6 @@ pub fn router(server: Arc<Server>) -> Router {
         server.config.limit.max_api_request_body_size.max(4096),
     );
     Router::new()
-        .layer(axum::middleware::from_fn(cors_middleware))
-        .layer(body_limit)
         .route("/", get(health))
         .route("/rtc/validate", get(validate_rtc))
         .route("/rtc/v1/validate", get(validate_rtc))
@@ -474,6 +493,8 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/rtc", get(rtc_ws))
         .route("/rtc/v1", get(rtc_ws_v1))
         .route("/agent", get(agent_ws))
+        .layer(axum::middleware::from_fn(cors_middleware))
+        .layer(body_limit)
         .with_state(server)
 }
 
