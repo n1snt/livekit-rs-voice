@@ -24,6 +24,7 @@ pub struct Server {
     pub cluster: Arc<crate::cluster::Cluster>,
     pub sip: tokio::sync::OnceCell<Arc<crate::psrpc::SipInternalClient>>,
     pub sip_io: tokio::sync::OnceCell<Arc<crate::psrpc::SipIoServer>>,
+    pub io_info: tokio::sync::OnceCell<Arc<crate::psrpc::PsrpcServer>>,
     pub egress: tokio::sync::OnceCell<Arc<crate::psrpc::EgressClient>>,
     rooms: Mutex<HashMap<String, Arc<Room>>>,
 }
@@ -45,7 +46,7 @@ impl Server {
         let config = Arc::new(config);
         let keys = KeyProvider::new(&config);
         let rtc = Arc::new(RtcEngine::new());
-        let webhook = WebhookNotifier::from_config(&config);
+        let webhook = WebhookNotifier::from_config(&config, &keys);
         let node_id = cluster.node_id.clone();
         let metrics = Arc::new(Metrics::new(&node_id, "SERVER"));
         let agent = Arc::new(AgentManager::new_with_keys(keys.clone()));
@@ -68,6 +69,7 @@ impl Server {
             cluster,
             sip: tokio::sync::OnceCell::new(),
             sip_io: tokio::sync::OnceCell::new(),
+            io_info: tokio::sync::OnceCell::new(),
             egress: tokio::sync::OnceCell::new(),
             rooms: Mutex::new(HashMap::new()),
         })
@@ -180,6 +182,10 @@ impl Server {
         for method in ["CreateEgress", "UpdateEgress"] {
             io_info.register(method, egress_handlers.clone()).await?;
         }
+        // Keep the IOInfo server alive for the lifetime of this Server (the
+        // subscription tasks it spawns are detached, so this is defensive, but
+        // it makes the lifecycle explicit).
+        let _ = self.io_info.set(io_info.clone());
         let _ = self.sip_io.set(io);
         tracing::info!("SIP IO service started (psrpc)");
         Ok(())

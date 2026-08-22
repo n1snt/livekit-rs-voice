@@ -71,14 +71,14 @@ pub struct RedisConfig {
 
 pub struct RedisBus {
     config: RedisConfig,
-    conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
+    conn: tokio::sync::Mutex<Option<redis::aio::ConnectionManager>>,
 }
 
 impl RedisBus {
     pub fn new(config: &RedisConfig) -> Self {
         RedisBus {
             config: config.clone(),
-            conn: tokio::sync::OnceCell::new(),
+            conn: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -98,8 +98,11 @@ impl RedisBus {
         redis::Client::open(url).map_err(|e| format!("redis connect: {e}"))
     }
 
+    /// Returns a connection manager, creating one if the cached connection was
+    /// dropped (e.g. after a publish error).
     async fn conn(&self) -> Result<redis::aio::ConnectionManager, String> {
-        if let Some(c) = self.conn.get() {
+        let mut guard = self.conn.lock().await;
+        if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
         let manager = self
@@ -107,7 +110,7 @@ impl RedisBus {
             .get_connection_manager()
             .await
             .map_err(|e| format!("redis manager: {e}"))?;
-        let _ = self.conn.set(manager.clone());
+        *guard = Some(manager.clone());
         Ok(manager)
     }
 }
@@ -115,39 +118,88 @@ impl RedisBus {
 #[async_trait::async_trait]
 impl PsrpcBus for RedisBus {
     async fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), String> {
-        let mut conn = self.conn().await?;
-        redis::cmd("PUBLISH")
-            .arg(channel)
-            .arg(payload)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| format!("redis publish: {e}"))
+        // Retry once with a fresh connection: a cached connection can be stale
+        // (e.g. redis restarted or the network blipped), and dropping it here
+        // makes the next publish reconnect.
+        for attempt in 0..2 {
+            let manager = self.conn().await?;
+            let mut manager = manager.clone();
+            let result = redis::cmd("PUBLISH")
+                .arg(channel)
+                .arg(&payload)
+                .query_async::<i64>(&mut manager)
+                .await;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    self.conn.lock().await.take();
+                    if attempt == 0 {
+                        tracing::warn!(%e, "psrpc redis publish failed; reconnecting");
+                        continue;
+                    }
+                    return Err(format!("redis publish: {e}"));
+                }
+            }
+        }
+        unreachable!()
     }
 
     async fn subscribe(
         &self,
         channels: Vec<String>,
     ) -> Result<BoxStream<'static, (String, Vec<u8>)>, String> {
-        let client = self.client()?;
-        let mut pubsub = client
-            .get_async_pubsub()
-            .await
-            .map_err(|e| format!("redis pubsub: {e}"))?;
-        for c in &channels {
-            pubsub
-                .subscribe(c)
-                .await
-                .map_err(|e| format!("redis subscribe {c}: {e}"))?;
-        }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = self.config.clone();
+        // Owns the pubsub connection and re-subscribes if it is ever dropped,
+        // so a transient disconnect does not silently kill the subscription.
         tokio::spawn(async move {
-            let mut stream = pubsub.on_message();
-            while let Some(msg) = stream.next().await {
-                let channel = msg.get_channel_name().to_string();
-                let payload: Vec<u8> = msg.get_payload().unwrap_or_default();
-                if tx.send((channel, payload)).is_err() {
-                    break;
+            loop {
+                let url = format!(
+                    "{}://{}:{}@{}/{}",
+                    if config.use_tls { "rediss" } else { "redis" },
+                    config.username,
+                    config.password,
+                    config.address,
+                    config.db
+                );
+                let client = match redis::Client::open(url) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(%e, "psrpc redis connect failed; retrying");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+                let mut pubsub = match client.get_async_pubsub().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(%e, "psrpc redis pubsub connect failed; retrying");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+                let mut subscribed = true;
+                for c in &channels {
+                    if let Err(e) = pubsub.subscribe(c.clone()).await {
+                        tracing::warn!(channel = %c, %e, "psrpc redis subscribe failed; retrying");
+                        subscribed = false;
+                        break;
+                    }
                 }
+                if !subscribed {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                let mut stream = pubsub.on_message();
+                while let Some(msg) = stream.next().await {
+                    let channel = msg.get_channel_name().to_string();
+                    let payload: Vec<u8> = msg.get_payload().unwrap_or_default();
+                    if tx.send((channel, payload)).is_err() {
+                        return; // receiver dropped
+                    }
+                }
+                tracing::warn!(?channels, "psrpc redis pubsub stream ended; reconnecting");
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -867,5 +919,43 @@ mod tests {
                 .map(String::as_str),
             Some("echo")
         );
+    }
+
+    /// Full psrpc round-trip over a real Redis (RedisBus), including the claim
+    /// negotiation. Ignored by default because it needs a Redis at
+    /// `LK_PSRPC_TEST_REDIS` (default 127.0.0.1:6379):
+    ///
+    /// ```text
+    /// docker run --rm -p 6379:6379 redis:7-alpine
+    /// cargo test -p lk-psrpc -- --ignored redis_round_trip
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires a real Redis"]
+    async fn redis_round_trip() {
+        let addr =
+            std::env::var("LK_PSRPC_TEST_REDIS").unwrap_or_else(|_| "127.0.0.1:6379".to_string());
+        let cfg = RedisConfig {
+            address: addr,
+            ..Default::default()
+        };
+        let bus: Arc<dyn PsrpcBus> = Arc::new(RedisBus::new(&cfg));
+
+        let io = PsrpcServer::new(bus.clone(), "EgressInternal")
+            .await
+            .unwrap();
+        io.register("StartEgress", Arc::new(EchoHandler))
+            .await
+            .unwrap();
+
+        let client = PsrpcClient::new(bus, "EgressInternal").await.unwrap();
+        let req = internal::Request {
+            request_id: "REQ_redis".to_string(),
+            ..Default::default()
+        };
+        let resp = client
+            .request("StartEgress", "", &req)
+            .await
+            .expect("psrpc round-trip over Redis should complete");
+        assert!(internal::Request::decode(resp.as_slice()).is_ok());
     }
 }

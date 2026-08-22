@@ -175,9 +175,15 @@ pub async fn connect(
         "{}/rtc?access_token={token}&publish=0&auto_subscribe=1&subscriber=1",
         ws_url
     );
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .map_err(|e| format!("ws connect: {e}"))?;
+    tracing::debug!(url = %url, identity, room, "joining room as subscriber");
+    let (mut ws, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .map_err(|_| format!("ws connect timed out: {url}"))?
+    .map_err(|e| format!("ws connect {url}: {e}"))?;
+    tracing::debug!("connected to {url}");
 
     let (audio_tx, audio_rx) = mpsc::channel::<AudioPacket>(256);
     let (out_tx, mut out_rx) = mpsc::channel::<lk::SignalRequest>(64);
