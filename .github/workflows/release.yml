@@ -1,15 +1,15 @@
 # Publish a multi-arch Docker image to Docker Hub and GHCR when a version tag is pushed.
 #
-#   git tag v1.13.5 && git push origin v1.13.5
+#   git tag v1.13.5.1 && git push origin v1.13.5.1
 #
 # Each architecture is built natively (no QEMU) on a matching runner, pushed
 # under a per-arch tag, then combined into multi-arch manifests:
 #
-# Images:
-#   n1snt/livekit-rs-voice:1.13.5 and :latest
-#   n1snt/livekit-rs-egress:1.13.5 and :latest
-#   ghcr.io/<owner>/livekit-rs-voice:1.13.5 and :latest
-#   ghcr.io/<owner>/livekit-rs-egress:1.13.5 and :latest
+# Images (one tag releases both services):
+#   n1snt/livekit-rs-voice:1.13.5.1 and :latest
+#   n1snt/livekit-rs-egress:1.13.5.1 and :latest
+#   ghcr.io/<owner>/livekit-rs-voice:1.13.5.1 and :latest
+#   ghcr.io/<owner>/livekit-rs-egress:1.13.5.1 and :latest
 name: Release
 
 on:

@@ -1,15 +1,19 @@
 # Changelog
 
 All notable changes to this project are documented in this file.
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-Releases are tagged `vX.Y.Z` and published as multi-arch (linux/amd64 and linux/arm64) Docker images to [Docker Hub](https://hub.docker.com/r/n1snt/livekit-rs-voice).
+Releases are tagged `vX.Y.Z.R` and published as multi-arch (linux/amd64 and linux/arm64) Docker images to [Docker Hub](https://hub.docker.com/r/n1snt/livekit-rs-voice) and GHCR.
 
 ## Versioning policy
 
-Versions mirror [livekit-server](https://github.com/livekit/livekit) releases: `1.13.5` means "wire/protocol level of livekit-server 1.13.5". We bump the version to match whenever we pick up upstream protocol patches, so the version always reflects the LiveKit protocol level the server implements.
+Versions mirror [livekit-server](https://github.com/livekit/livekit) releases. The first three components, `X.Y.Z`, are the wire/protocol level: `1.13.5` means "the protocol of livekit-server 1.13.5". We bump `X.Y.Z` whenever we pick up upstream protocol patches, so it always reflects the LiveKit protocol level the server implements.
 
-## [Unreleased]
+The fourth component, `R`, is our own build/patch revision for changes that do not alter the wire protocol (bug fixes, tooling, tests). So `1.13.5.1` is protocol level 1.13.5 with our first post-release fix set. A single `vX.Y.Z.R` tag releases **both** services (`livekit-rs-voice` and `livekit-rs-egress`) as one multi-arch image pair.
+
+The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision.
+
+## [1.13.5.1] - 2026-08-22
 
 ### Added
 
