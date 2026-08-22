@@ -23,6 +23,7 @@ cargo run --release -p lk-server -- --dev
 Images are published to Docker Hub on every `v*` tag; each service ships its own small image:
 [`n1snt/livekit-rs-voice`](https://hub.docker.com/r/n1snt/livekit-rs-voice) and
 [`n1snt/livekit-rs-egress`](https://hub.docker.com/r/n1snt/livekit-rs-egress).
+One tag releases both; see [docs/versioning.md](docs/versioning.md) for the tag/release policy.
 
 ## Differences from LiveKit
 

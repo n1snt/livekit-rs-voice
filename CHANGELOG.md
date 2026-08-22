@@ -11,7 +11,7 @@ Versions mirror [livekit-server](https://github.com/livekit/livekit) releases. T
 
 The fourth component, `R`, is our own build/patch revision for changes that do not alter the wire protocol (bug fixes, tooling, tests). So `1.13.5.1` is protocol level 1.13.5 with our first post-release fix set. A single `vX.Y.Z.R` tag releases **both** services (`livekit-rs-voice` and `livekit-rs-egress`) as one multi-arch image pair.
 
-The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision.
+The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision. See [docs/versioning.md](docs/versioning.md) for the full policy.
 
 ## [1.13.5.1] - 2026-08-22
 
