@@ -1,0 +1,8 @@
+# Shared by scripts/bench/bench_egress.sh --stack go.
+api_key: devkey
+api_secret: secret
+ws_url: ws://server:7880
+redis:
+  address: redis:6379
+log_level: info
+prometheus_port: 9091

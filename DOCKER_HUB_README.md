@@ -38,7 +38,8 @@ Multi-arch: `linux/amd64`, `linux/arm64`.
 ## Documentation
 
 - [Project README](https://github.com/n1snt/livekit-rs-voice)
-- [Benchmark: Rust vs Go livekit-server](benchmark_livekit_rs_voice.md)
+- [Benchmark: Rust vs Go livekit-server](docs/benchmark_livekit_rs_voice.md)
+- [Benchmark: Rust vs Go livekit-egress](docs/benchmark_livekit_rs_egress.md)
 
 ## License
 

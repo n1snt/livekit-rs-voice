@@ -1,0 +1,7 @@
+# Rust stack config (scripts/bench/bench_egress.sh --stack rust).
+port: 7880
+keys:
+  devkey: secret
+
+redis:
+  address: redis:6379

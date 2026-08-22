@@ -1,0 +1,9 @@
+# Rust stack config (scripts/bench/bench_egress.sh --stack rust).
+api_key: devkey
+api_secret: secret
+ws_url: ws://server:7880
+output_dir: /out
+redis:
+  address: redis:6379
+logging:
+  level: info

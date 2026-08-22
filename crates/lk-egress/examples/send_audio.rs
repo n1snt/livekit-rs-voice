@@ -29,6 +29,51 @@ use webrtc::track::track_local::TrackLocalWriter;
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn log(args: std::fmt::Arguments<'_>) {
+    if VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{args}");
+    }
+}
+
+fn message_name(m: &lk::signal_response::Message) -> &'static str {
+    match m {
+        lk::signal_response::Message::Join(_) => "Join",
+        lk::signal_response::Message::Answer(_) => "Answer",
+        lk::signal_response::Message::Offer(_) => "Offer",
+        lk::signal_response::Message::Trickle(_) => "Trickle",
+        lk::signal_response::Message::Update(_) => "Update",
+        lk::signal_response::Message::TrackPublished(_) => "TrackPublished",
+        lk::signal_response::Message::Leave(_) => "Leave",
+        lk::signal_response::Message::Mute(_) => "Mute",
+        lk::signal_response::Message::SpeakersChanged(_) => "SpeakersChanged",
+        lk::signal_response::Message::RoomUpdate(_) => "RoomUpdate",
+        lk::signal_response::Message::ConnectionQuality(_) => "ConnectionQuality",
+        lk::signal_response::Message::StreamStateUpdate(_) => "StreamStateUpdate",
+        lk::signal_response::Message::SubscribedQualityUpdate(_) => "SubscribedQualityUpdate",
+        lk::signal_response::Message::SubscriptionPermissionUpdate(_) => {
+            "SubscriptionPermissionUpdate"
+        }
+        lk::signal_response::Message::RefreshToken(_) => "RefreshToken",
+        lk::signal_response::Message::TrackUnpublished(_) => "TrackUnpublished",
+        lk::signal_response::Message::Pong(_) => "Pong",
+        lk::signal_response::Message::Reconnect(_) => "Reconnect",
+        lk::signal_response::Message::PongResp(_) => "PongResp",
+        lk::signal_response::Message::SubscriptionResponse(_) => "SubscriptionResponse",
+        lk::signal_response::Message::RequestResponse(_) => "RequestResponse",
+        lk::signal_response::Message::TrackSubscribed(_) => "TrackSubscribed",
+        lk::signal_response::Message::RoomMoved(_) => "RoomMoved",
+        lk::signal_response::Message::MediaSectionsRequirement(_) => "MediaSectionsRequirement",
+        lk::signal_response::Message::SubscribedAudioCodecUpdate(_) => "SubscribedAudioCodecUpdate",
+        lk::signal_response::Message::PublishDataTrackResponse(_) => "PublishDataTrackResponse",
+        lk::signal_response::Message::UnpublishDataTrackResponse(_) => "UnpublishDataTrackResponse",
+        lk::signal_response::Message::DataTrackSubscriberHandles(_) => "DataTrackSubscriberHandles",
+        lk::signal_response::Message::StoreDataBlobResponse(_) => "StoreDataBlobResponse",
+        lk::signal_response::Message::GetDataBlobResponse(_) => "GetDataBlobResponse",
+    }
+}
+
 fn main() {
     let mut ws_url = "ws://127.0.0.1:7880".to_string();
     let mut key = "devkey".to_string();
@@ -43,9 +88,10 @@ fn main() {
             "--secret" => secret = iter.next().unwrap(),
             "--room" => room = iter.next().unwrap(),
             "--seconds" => seconds = iter.next().unwrap().parse().unwrap(),
+            "--verbose" => VERBOSE.store(true, std::sync::atomic::Ordering::Relaxed),
             "--help" => {
                 println!(
-                    "send_audio --ws <url> --key <k> --secret <s> --room <room> --seconds <n>"
+                    "send_audio --ws <url> --key <k> --secret <s> --room <room> --seconds <n> [--verbose]"
                 );
                 return;
             }
@@ -77,7 +123,18 @@ async fn read_response(ws: &mut Ws) -> lk::SignalResponse {
     loop {
         match futures_util::StreamExt::next(ws).await {
             Some(Ok(Message::Binary(bytes))) => {
-                return lk::SignalResponse::decode(bytes.as_ref()).unwrap()
+                let resp = lk::SignalResponse::decode(bytes.as_ref()).unwrap();
+                if let Some(m) = &resp.message {
+                    log(format_args!("recv {}", message_name(m)));
+                }
+                // The Go server refreshes access tokens periodically; skip.
+                if matches!(
+                    resp.message,
+                    Some(lk::signal_response::Message::RefreshToken(_))
+                ) {
+                    continue;
+                }
+                return resp;
             }
             Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
             Some(Ok(_)) => continue,
@@ -131,6 +188,7 @@ async fn client_pc(
                 if let Some(c) = c {
                     if let Ok(init) = c.to_json() {
                         if let Ok(json) = serde_json::to_string(&init) {
+                            log(format_args!("trickle target={target} candidate={json}"));
                             let mut ws = ws.lock().await;
                             let _ = send_request(
                                 &mut ws,
@@ -151,38 +209,90 @@ async fn client_pc(
             })
         },
     ));
+    let name = if target == 0 {
+        "publisher"
+    } else {
+        "subscriber"
+    };
+    pc.on_peer_connection_state_change(Box::new(
+        move |s: webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState| {
+            log(format_args!("{name} PC state: {s}"));
+            Box::pin(async {})
+        },
+    ));
     Arc::new(pc)
 }
 
-async fn await_message<F: Fn(&lk::SignalResponse) -> bool>(
-    ws: &mut Ws,
-    pc_pub: &Arc<webrtc::peer_connection::RTCPeerConnection>,
-    pc_sub: &Arc<webrtc::peer_connection::RTCPeerConnection>,
-    matches: F,
-) -> lk::SignalResponse {
-    for _ in 0..400 {
+/// Waits for the subscriber offer, skipping refresh tokens, participant
+/// updates and other unrelated messages (the Go server interleaves them).
+async fn await_offer(ws: &mut Ws) -> String {
+    loop {
         let resp = read_response(ws).await;
-        if let Some(lk::signal_response::Message::Trickle(t)) = &resp.message {
-            if let Ok(init) = serde_json::from_str::<
-                webrtc::ice_transport::ice_candidate::RTCIceCandidateInit,
-            >(&t.candidate_init)
-            {
-                match t.target {
-                    0 => {
-                        let _ = pc_pub.add_ice_candidate(init.clone()).await;
-                    }
-                    _ => {
-                        let _ = pc_sub.add_ice_candidate(init).await;
-                    }
-                }
-            }
-            continue;
-        }
-        if matches(&resp) {
-            return resp;
+        match resp.message {
+            Some(lk::signal_response::Message::Offer(o)) => return o.sdp,
+            _ => continue,
         }
     }
-    panic!("timed out");
+}
+
+/// Answers a subscriber offer sent by the server and returns the subscriber PC.
+async fn setup_subscriber(
+    ws: &Arc<tokio::sync::Mutex<Ws>>,
+    sdp: &str,
+) -> Result<Arc<webrtc::peer_connection::RTCPeerConnection>, String> {
+    let pc = client_pc(ws.clone(), 1).await;
+    let mut offer = RTCSessionDescription::default();
+    offer.sdp_type = RTCSdpType::Offer;
+    offer.sdp = sdp.to_string();
+    pc.set_remote_description(offer)
+        .await
+        .map_err(|e| e.to_string())?;
+    log(format_args!("subscriber offer set"));
+    let answer = pc.create_answer(None).await.map_err(|e| e.to_string())?;
+    pc.set_local_description(answer.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut guard = ws.lock().await;
+    send_request(
+        &mut guard,
+        &lk::SignalRequest {
+            message: Some(lk::signal_request::Message::Answer(
+                lk::SessionDescription {
+                    r#type: "answer".to_string(),
+                    sdp: answer.sdp.clone(),
+                    ..Default::default()
+                },
+            )),
+        },
+    )
+    .await;
+    drop(guard);
+    log(format_args!("subscriber answer sent"));
+    Ok(pc)
+}
+
+/// Feeds a trickle candidate to the PC it targets (0 = publisher, 1 = subscriber).
+async fn feed_trickle(
+    pub_pc: &Arc<webrtc::peer_connection::RTCPeerConnection>,
+    sub_pc: Option<&Arc<webrtc::peer_connection::RTCPeerConnection>>,
+    t: &lk::TrickleRequest,
+) {
+    let Ok(init) = serde_json::from_str::<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>(
+        &t.candidate_init,
+    ) else {
+        return;
+    };
+    match t.target {
+        0 => {
+            let _ = pub_pc.add_ice_candidate(init).await;
+        }
+        1 => {
+            if let Some(pc) = sub_pc {
+                let _ = pc.add_ice_candidate(init).await;
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn publish(
@@ -197,6 +307,7 @@ async fn publish(
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .map_err(|e| e.to_string())?;
+    log(format_args!("connected to {url}"));
     let ws = Arc::new(tokio::sync::Mutex::new(ws));
 
     // Keep the signal connection alive (the server closes sessions that send
@@ -221,45 +332,29 @@ async fn publish(
 
     let mut guard = ws.lock().await;
     let _ = read_response(&mut guard).await; // join
-    let sub_offer_sdp = match read_response(&mut guard).await.message {
-        Some(lk::signal_response::Message::Offer(o)) => o.sdp,
-        other => panic!("expected subscriber offer, got {other:?}"),
-    };
     drop(guard);
+
+    // The legacy flow answers the server's subscriber offer before publishing.
+    // In fastPublish mode (the Go server) no offer is sent, so fall back to
+    // publishing directly after a short wait.
+    let mut sub_pc: Option<Arc<webrtc::peer_connection::RTCPeerConnection>> = None;
+    match tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut guard = ws.lock().await;
+        let sdp = await_offer(&mut guard).await;
+        drop(guard);
+        sdp
+    })
+    .await
+    {
+        Ok(sdp) => {
+            sub_pc = Some(setup_subscriber(&ws, &sdp).await?);
+        }
+        Err(_) => log(format_args!(
+            "no subscriber offer within 3s (fastPublish); publishing directly"
+        )),
+    }
 
     let pub_pc = client_pc(ws.clone(), 0).await;
-    let pub_sub_pc = client_pc(ws.clone(), 1).await;
-    let mut sub_offer = RTCSessionDescription::default();
-    sub_offer.sdp_type = RTCSdpType::Offer;
-    sub_offer.sdp = sub_offer_sdp;
-    pub_sub_pc
-        .set_remote_description(sub_offer)
-        .await
-        .map_err(|e| e.to_string())?;
-    let sub_answer = pub_sub_pc
-        .create_answer(None)
-        .await
-        .map_err(|e| e.to_string())?;
-    pub_sub_pc
-        .set_local_description(sub_answer.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut guard = ws.lock().await;
-    send_request(
-        &mut guard,
-        &lk::SignalRequest {
-            message: Some(lk::signal_request::Message::Answer(
-                lk::SessionDescription {
-                    r#type: "answer".to_string(),
-                    sdp: sub_answer.sdp.clone(),
-                    ..Default::default()
-                },
-            )),
-        },
-    )
-    .await;
-    drop(guard);
-
     let out_track = Arc::new(TrackLocalStaticRTP::new(
         RTCRtpCodecCapability {
             mime_type: MIME_TYPE_OPUS.to_owned(),
@@ -297,15 +392,29 @@ async fn publish(
         },
     )
     .await;
-    let resp = await_message(&mut guard, &pub_pc, &pub_sub_pc, |r| {
-        matches!(r.message, Some(lk::signal_response::Message::Answer(_)))
-    })
-    .await;
-    let answer_sdp = match resp.message {
-        Some(lk::signal_response::Message::Answer(a)) => a.sdp,
-        _ => panic!("no answer"),
+    log(format_args!("publisher offer sent"));
+
+    // Wait for the publisher answer, handling a late subscriber offer and
+    // trickle candidates along the way.
+    let answer_sdp = loop {
+        let resp = read_response(&mut guard).await;
+        match resp.message {
+            Some(lk::signal_response::Message::Answer(a)) => break a.sdp,
+            Some(lk::signal_response::Message::Offer(o)) => {
+                if sub_pc.is_none() {
+                    drop(guard);
+                    sub_pc = Some(setup_subscriber(&ws, &o.sdp).await?);
+                    guard = ws.lock().await;
+                }
+            }
+            Some(lk::signal_response::Message::Trickle(t)) => {
+                feed_trickle(&pub_pc, sub_pc.as_ref(), &t).await;
+            }
+            _ => {}
+        }
     };
     drop(guard);
+    log(format_args!("publisher answer received"));
     let mut sd = RTCSessionDescription::default();
     sd.sdp_type = RTCSdpType::Answer;
     sd.sdp = answer_sdp;
@@ -313,6 +422,7 @@ async fn publish(
         .set_remote_description(sd)
         .await
         .map_err(|e| e.to_string())?;
+    log(format_args!("publisher remote description set"));
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
 
     let enc = audiopus::coder::Encoder::new(
@@ -347,6 +457,6 @@ async fn publish(
     // Stay joined a moment so the recorder drains, then leave.
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-    let _ = ws.lock().await;
+    log(format_args!("done"));
     Ok(())
 }

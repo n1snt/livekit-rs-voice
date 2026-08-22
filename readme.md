@@ -35,8 +35,8 @@ Images are published to Docker Hub on every `v*` tag; each service ships its own
 
 ## Benchmarks
 
-See [benchmark_livekit_rs_voice.md](benchmark_livekit_rs_voice.md) (server)
-and [benchmark_livekit_rs_egress.md](benchmark_livekit_rs_egress.md) (recorder). Measured on a MacBook Pro (Apple M1, 32 GB RAM, 1 TB SSD): ~19x faster joins (p50), ~17x more joins/s, ~2x less memory per connection, and ~2x more pings / ~7x more joins per CPU-second than the Go `livekit-server`.
+See [docs/benchmark_livekit_rs_voice.md](docs/benchmark_livekit_rs_voice.md) (server)
+and [docs/benchmark_livekit_rs_egress.md](docs/benchmark_livekit_rs_egress.md) (recorder). Measured on a MacBook Pro (Apple M1, 32 GB RAM, 1 TB SSD): ~19x faster joins (p50), ~17x more joins/s, ~2x less memory per connection, and ~2x more pings / ~7x more joins per CPU-second than the Go `livekit-server`.
 
 ```bash
 cargo bench -p lk-proto --bench proto

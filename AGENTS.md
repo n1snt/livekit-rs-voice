@@ -80,6 +80,6 @@ crates/lk-egress/   the voice-only recorder (bin `livekit-egress`):
 
 ## Docs policy
 
-Public docs are intentionally minimal: `readme.md` (quick start + "Differences from LiveKit"), `benchmark_livekit_rs_voice.md`, `CHANGELOG.md`. When behavior changes, update `CHANGELOG.md` (Keep a Changelog) and the "Differences from LiveKit" section in `readme.md` if users are affected. Do not create new `.md` docs unless asked.
+Public docs are intentionally minimal: `readme.md` (quick start + "Differences from LiveKit"), `docs/benchmark_livekit_rs_voice.md`, `docs/benchmark_livekit_rs_egress.md`, `CHANGELOG.md`. When behavior changes, update `CHANGELOG.md` (Keep a Changelog) and the "Differences from LiveKit" section in `readme.md` if users are affected. Do not create new `.md` docs unless asked.
 
 **Markdown prose must flow naturally.** Do not hard-wrap paragraphs at a column width or break lines between sentences. Write each paragraph as a single line (CommonMark renders it the same) so copying the text out of the file yields natural prose, not broken lines. Lists and tables keep their per-line structure.

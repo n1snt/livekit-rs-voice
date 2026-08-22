@@ -1,0 +1,24 @@
+# Go benchmark stack: livekit-server + livekit/egress + redis, all on one
+# bridge network so WebRTC media flows container-to-container. Used by
+# scripts/bench/bench_egress.sh --stack go.
+services:
+  redis:
+    image: redis:7-alpine
+
+  server:
+    image: livekit/livekit-server:v1.11.0
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./go-server.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7990:7880/tcp"
+
+  egress:
+    image: livekit/egress:latest
+    environment:
+      EGRESS_CONFIG_FILE: /etc/egress.yaml
+    volumes:
+      - ./go-egress.yaml:/etc/egress.yaml:ro
+      - ./out-go:/out
+    depends_on:
+      - server

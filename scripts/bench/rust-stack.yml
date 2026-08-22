@@ -1,0 +1,23 @@
+# Rust benchmark stack: livekit-voice + livekit-egress + redis, all on one
+# bridge network so WebRTC media flows container-to-container. Used by
+# scripts/bench/bench_egress.sh --stack rust.
+services:
+  redis:
+    image: redis:7-alpine
+
+  server:
+    image: livekit-rs-voice:local
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./rust-server.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7991:7880/tcp"
+
+  egress:
+    image: livekit-rs-egress:local
+    command: ["--config", "/etc/livekit-egress/egress.yaml"]
+    volumes:
+      - ./rust-egress.yaml:/etc/livekit-egress/egress.yaml:ro
+      - ./out-rust:/out
+    depends_on:
+      - server
