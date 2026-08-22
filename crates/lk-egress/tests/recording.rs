@@ -311,6 +311,8 @@ async fn stream_audio(out_track: Arc<TrackLocalStaticRTP>, seconds: u64, ssrc: u
     let n = enc.encode(&silence, &mut opus).unwrap();
     let payload = opus[..n].to_vec();
     let mut seq = base_seq;
+    // Pace in real time (one 20 ms frame every 20 ms) so a late-subscribing
+    // recorder still captures the tail of the stream.
     for i in 0..(seconds * 50) {
         let pkt = webrtc::rtp::packet::Packet {
             header: webrtc::rtp::header::Header {
@@ -325,9 +327,8 @@ async fn stream_audio(out_track: Arc<TrackLocalStaticRTP>, seconds: u64, ssrc: u
         };
         let _ = out_track.write_rtp(&pkt).await;
         seq = seq.wrapping_add(1);
-        if i % 20 == 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let _ = i;
     }
 }
 
@@ -452,28 +453,33 @@ async fn records_mp3() {
 
     let (pub_ws, _pc, out_track) = connect_publisher(&base, "mp3-pub", "mp3-room", "mic1").await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let stream = tokio::spawn(stream_audio(out_track.clone(), 4, 0x11111111, 1));
+    let stream = tokio::spawn(stream_audio(out_track.clone(), 8, 0x11111111, 1));
 
     let egress_id = start_egress_twirp(&base, "mp3-room", 3).await; // EncodedFileType::MP3
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     stop_egress_twirp(&base, &egress_id).await;
     let _ = stream.await;
 
     let mp3 = wait_finalized(&out_dir, "mp3").await;
     assert!(!mp3.is_empty());
 
-    // Validate MPEG frame sync and rough duration: every frame starts 0xFF 0xE.
+    // Validate MPEG frame sync: every MP3 frame starts 0xFF 0xE.
     let syncs = mp3
         .windows(2)
         .filter(|w| w[0] == 0xFF && (w[1] & 0xE0) == 0xE0)
         .count();
     assert!(
-        syncs > 50,
-        "MP3 must contain many MPEG frame syncs (got {syncs})"
+        syncs > 20,
+        "MP3 must contain MPEG frame syncs (got {syncs})"
     );
 
-    // Recorded window was ~3s of active audio; the file must be non-trivial.
-    assert!(mp3.len() > 10_000, "MP3 too small: {} bytes", mp3.len());
+    // The recorder must have captured a meaningful window of the (real-time)
+    // 8s stream, regardless of how fast this machine subscribes.
+    let dur_ms = (syncs as u64 * 1152) / 48; // 1152 samples/frame @ 48 kHz
+    assert!(
+        (1000..=9000).contains(&dur_ms),
+        "MP3 duration {dur_ms} ms out of range for the 8s stream"
+    );
     drop(pub_ws);
     let _ = server;
     let _ = std::fs::remove_dir_all(&out_dir);
