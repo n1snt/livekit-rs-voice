@@ -54,6 +54,7 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 - `ever_joined` / `empty_since` are driven only by non-dependent joins (an egress/agent joining no longer marks the room as ever-joined).
 - Deleted agent dispatches are removed from the registry and excluded from `list`/`get`, so a deleted dispatch can never be launched when its room is created.
 - `livekit_packet_loss_total` / `livekit_packet_out_of_order_total` are now fed from per-track loss/out-of-order deltas (previously registered but never incremented).
+- Publisher/subscriber peer-connection creation is serialized per participant (a dedicated `pc_create` lock, distinct from negotiation), so two concurrent calls can no longer both pass the check-then-create and leak a PC.
 
 ## [1.13.5.1] - 2026-08-22
 

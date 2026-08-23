@@ -185,6 +185,9 @@ pub struct ParticipantMedia {
     pub negotiating: Arc<AsyncMutex<()>>,
     pub answer_pending: AtomicBool,
     pub needs_negotiation: AtomicBool,
+    /// Serializes publisher/subscriber peer-connection creation so two
+    /// concurrent calls cannot both pass the check-then-create and leak a PC.
+    pub pc_create: Arc<AsyncMutex<()>>,
 }
 
 /// Receiver side of a published audio track. Forwards every RTP packet to all
@@ -522,6 +525,10 @@ pub async fn setup_subscriber(participant: &Arc<Participant>) -> Result<(), Stri
         .and_then(|r| r.context())
         .ok_or("participant has no room context")?;
 
+    // Serialize PC creation (distinct from `negotiating`): two concurrent
+    // calls must not both pass the check-then-create and leak a PC.
+    let pc_lock = participant.media.lock().unwrap().pc_create.clone();
+    let _pc_guard = pc_lock.lock().await;
     {
         let media = participant.media.lock().unwrap();
         if media.subscriber.is_some() {
@@ -676,6 +683,11 @@ pub async fn ensure_publisher(
         .room()
         .and_then(|r| r.context())
         .ok_or("participant has no room context")?;
+
+    // Serialize PC creation (distinct from `negotiating`): two concurrent
+    // calls must not both pass the check-then-create and leak a PC.
+    let pc_lock = participant.media.lock().unwrap().pc_create.clone();
+    let _pc_guard = pc_lock.lock().await;
     {
         let media = participant.media.lock().unwrap();
         if let Some(pc) = &media.publisher {
