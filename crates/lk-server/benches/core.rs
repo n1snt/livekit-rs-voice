@@ -60,7 +60,7 @@ fn bench_jwt_verify(c: &mut Criterion) {
 fn room_for_bench() -> Arc<Room> {
     let ctx = Arc::new(RoomContext::new(
         Arc::new(Config::default()),
-        Arc::new(lk_server::media::RtcEngine::new()),
+        Arc::new(lk_server::media::RtcEngine::new(&Config::default().rtc)),
         lk_server::webhook::WebhookNotifier::disabled(),
         Arc::new(lk_server::metrics::Metrics::default()),
         Arc::new(lk_server::agent::AgentManager::new()),

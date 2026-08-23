@@ -322,6 +322,35 @@ impl AgentManager {
             .collect()
     }
 
+    /// Launches room-level agent dispatches targeting `room` that were created
+    /// before the room existed (e.g. outbound calls create the dispatch before
+    /// the SIP participant joins). Fire-and-forget per dispatch, matching the
+    /// `CreateDispatch` immediate-launch path.
+    pub fn launch_room_dispatches(self: &Arc<Self>, room: &Arc<crate::room::Room>) {
+        let dispatches = self.list_dispatches(&room.name);
+        for d in dispatches {
+            let manager = self.clone();
+            let room = room.clone();
+            let metadata = d.metadata.clone();
+            let deployment = d.deployment.clone();
+            let attributes = d.attributes.clone();
+            let agent_name = d.agent_name.clone();
+            let dispatch_id = d.id.clone();
+            tokio::spawn(async move {
+                let _ = manager
+                    .launch_room_job(
+                        &agent_name,
+                        &room,
+                        &metadata,
+                        &deployment,
+                        attributes,
+                        Some(&dispatch_id),
+                    )
+                    .await;
+            });
+        }
+    }
+
     pub fn get_dispatch(&self, id: &str) -> Option<AgentDispatch> {
         self.dispatches.lock().unwrap().get(id).cloned()
     }
@@ -590,5 +619,53 @@ mod tests {
             .launch_room_job("voice-agent", &room, "{}", "", Default::default(), None)
             .await;
         assert!(res.is_err()); // timed out (no availability response)
+    }
+
+    #[tokio::test]
+    async fn dispatch_created_before_room_launches_when_room_created() {
+        let keys = std::iter::once(("key".to_string(), "secret".to_string())).collect();
+        let manager = Arc::new(AgentManager::new_with_keys(
+            crate::auth::KeyProvider::from_map(keys),
+        ));
+        let (tx, mut rx) = mpsc::channel(8);
+        let worker = Arc::new(Worker {
+            worker_id: "w1".to_string(),
+            api_key: "key".to_string(),
+            agent_name: "voice-agent".to_string(),
+            job_type: 0,
+            status: AtomicU32::new(0),
+            load: AtomicU32::new(0),
+            job_count: AtomicU32::new(0),
+            ping_interval: 10,
+            is_available: AtomicBool::new(true),
+            tx: Mutex::new(Some(tx)),
+            availability: Mutex::new(None),
+        });
+        manager.register_worker(worker);
+
+        // Outbound flow: the dispatch targets a room that does not exist yet
+        // (the backend dispatches before the SIP participant joins).
+        manager.create_dispatch(
+            "voice-agent".to_string(),
+            "late-room".to_string(),
+            "{}".to_string(),
+            String::new(),
+            Default::default(),
+        );
+
+        // The room is created later; launching pending dispatches must reach
+        // the worker (an AvailabilityRequest is sent over the worker socket).
+        let ctx = crate::room::test_context();
+        let room = crate::room::Room::new("late-room".to_string(), std::sync::Arc::downgrade(&ctx));
+        manager.launch_room_dispatches(&room);
+
+        let msg = tokio::time::timeout(DISPATCH_TIMEOUT, rx.recv())
+            .await
+            .expect("worker received a message")
+            .expect("message present");
+        assert!(matches!(
+            msg.message,
+            Some(lk::server_message::Message::Availability(_))
+        ));
     }
 }

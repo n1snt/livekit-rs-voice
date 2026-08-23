@@ -138,19 +138,22 @@ pub async fn on_track_unpublished(participant: &Arc<Participant>, track_sid: &st
 }
 
 /// Best-effort handling of media connection failure. Voice sessions tolerate
-/// brief ICE restarts, so we only log here; the signal connection drives
-/// participant teardown.
+/// brief ICE restarts, so graceful `Closed` only logs; the signal connection
+/// drives normal teardown.
 ///
 /// On an abnormal failure (`failed`), we emit the reference `livekit-server`
 /// DTLS-timeout message verbatim so the existing DTLS-timeout alert (which
-/// matches that exact string) keeps firing; graceful `Closed` stays a debug
-/// line.
+/// matches that exact string) keeps firing, and tear the participant down so
+/// `participant_left` / `room_finished` fire (reference parity — a participant
+/// whose media dies while the signal socket stays alive must not remain
+/// wedged in the room).
 pub async fn on_media_disconnected(participant: &Arc<Participant>, failed: bool) {
     if failed {
         tracing::warn!(
             sid = %participant.sid,
             "dtls timeout: read/write timeout: context deadline exceeded (media connection lost)"
         );
+        end_participant(participant, lk::DisconnectReason::ClientInitiated).await;
     } else {
         tracing::debug!(sid = %participant.sid, "media connection lost");
     }

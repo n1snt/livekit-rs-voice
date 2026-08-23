@@ -47,7 +47,7 @@ impl RoomContext {
     pub fn test_context() -> Arc<RoomContext> {
         Arc::new(RoomContext::new(
             Arc::new(crate::config::Config::default()),
-            Arc::new(RtcEngine::new()),
+            Arc::new(RtcEngine::new(&crate::config::RTCConfig::default())),
             WebhookNotifier::disabled(),
             Arc::new(Metrics::default()),
             Arc::new(crate::agent::AgentManager::new()),

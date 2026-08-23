@@ -37,6 +37,10 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 - S3 `FileInfo.location` now matches where the object is actually stored. Custom endpoints (R2, MinIO) always report `{endpoint}/{bucket}/{key}` because `object_store` uploads path-style there regardless of `force_path_style`; real AWS reports virtual-hosted or path-style consistently with the PUT. Previously the URL omitted the bucket for custom endpoints, so a client signing a GET against it hit a non-existent bucket and playback broke.
 - Failed recordings now report `EGRESS_FAILED` to the server (with the error message), so the `egress_ended` webhook fires and the stored `EgressInfo` is terminal instead of a stale STARTING/ACTIVE state a sweeper could adopt.
 - `egress_started` is now deduped against the durable Redis store instead of an in-memory set, so an SFU restart cannot re-fire it for a retried `CreateEgress` (matches the reference `LoadEgress` check).
+- Outbound calls now launch the agent: when a room is created after an agent dispatch targeted it (the backend dispatches the room before the SIP participant joins), pending dispatches for that room are launched. Previously outbound calls connected with no agent answering.
+- A participant whose media plane fails (`Failed`) is now torn down, so `participant_left` / `room_finished` fire instead of the participant lingering while the signal socket stays alive (reference parity).
+- The participant's `Active` transition is now broadcast as a `ParticipantUpdate`, so subscribers and an agent's `wait_for_participant` see the participant as active without waiting for media to publish.
+- The RTC config now wires `rtc.node_ip` / `rtc.use_external_ip` (NAT 1:1 host candidate) and `rtc.ips.includes` / `rtc.ips.excludes` (candidate IP filter) into the webrtc-rs setting engine, so browser-visible media uses the configured public addresses instead of auto-discovered interfaces. `rtc.udp_port` / `rtc.port_range_*` still cannot be honored (webrtc-rs 0.12 has no UDP port-range API).
 
 ## [1.13.5.1] - 2026-08-22
 

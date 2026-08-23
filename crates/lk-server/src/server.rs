@@ -45,7 +45,7 @@ impl Server {
     pub fn with_cluster(config: Config, cluster: Arc<crate::cluster::Cluster>) -> Arc<Self> {
         let config = Arc::new(config);
         let keys = KeyProvider::new(&config);
-        let rtc = Arc::new(RtcEngine::new());
+        let rtc = Arc::new(RtcEngine::new(&config.rtc));
         let webhook = WebhookNotifier::from_config(&config, &keys);
         let node_id = cluster.node_id.clone();
         let metrics = Arc::new(Metrics::new(&node_id, "SERVER"));
@@ -91,11 +91,30 @@ impl Server {
             }
         });
         self.context.metrics.room_total.inc();
-        let mut rooms = self.rooms.lock().unwrap();
-        rooms
-            .entry(name.to_string())
-            .or_insert_with(|| room.clone());
-        room
+        let created_room = {
+            let mut rooms = self.rooms.lock().unwrap();
+            let existing = rooms
+                .entry(name.to_string())
+                .or_insert_with(|| room.clone());
+            existing.clone()
+        };
+        if Arc::ptr_eq(&created_room, &room) {
+            // This call created the room: launch any agent dispatches that were
+            // created for it before the room existed (outbound calls create the
+            // dispatch before the SIP participant joins the room).
+            let this = self.clone();
+            let spawned_room = created_room.clone();
+            tokio::spawn(async move {
+                this.launch_pending_dispatches(&spawned_room).await;
+            });
+        }
+        created_room
+    }
+
+    /// Launches room-level agent dispatches that target a room created after
+    /// the dispatch was recorded (see `get_or_create_room`).
+    async fn launch_pending_dispatches(self: &Arc<Self>, room: &Arc<Room>) {
+        self.context.agent.launch_room_dispatches(room);
     }
 
     pub fn get_room(&self, name: &str) -> Option<Arc<Room>> {

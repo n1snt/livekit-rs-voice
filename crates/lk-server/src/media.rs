@@ -14,9 +14,11 @@ use prost::Message as _;
 use tokio::sync::Mutex as AsyncMutex;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_OPUS};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -67,7 +69,7 @@ pub struct RtcEngine {
 }
 
 impl RtcEngine {
-    pub fn new() -> Self {
+    pub fn new(rtc: &crate::config::RTCConfig) -> Self {
         let mut media_engine = MediaEngine::default();
         media_engine
             .register_codec(
@@ -104,9 +106,36 @@ impl RtcEngine {
         registry = register_default_interceptors(registry, &mut media_engine)
             .expect("register default interceptors");
 
+        let mut setting = SettingEngine::default();
+        // Advertise the node's public IP as the host candidate when configured
+        // (prod sets node_ip / use_external_ip so browser-visible media uses
+        // 216.48.182.132 instead of the private 10.x address).
+        if !rtc.node_ip.is_empty() {
+            setting.set_nat_1to1_ips(vec![rtc.node_ip.clone()], RTCIceCandidateType::Host);
+        }
+        // Restrict gathered candidates to the configured IP list (ips.includes
+        // / ips.excludes, e.g. 216.48.182.132 + 10.18.90.6). webrtc-rs 0.12 has
+        // no UDP port-range API, so rtc.udp_port / port_range_* cannot be
+        // honored without an upstream change; candidates keep ephemeral ports.
+        let ips = &rtc.ips;
+        if !ips.includes.is_empty() || !ips.excludes.is_empty() {
+            let includes = ips.includes.clone();
+            let excludes = ips.excludes.clone();
+            setting.set_ip_filter(Box::new(move |ip: std::net::IpAddr| {
+                let ip = ip.to_string();
+                let keep = if includes.is_empty() {
+                    true
+                } else {
+                    includes.iter().any(|i| ip.starts_with(i))
+                };
+                keep && !excludes.iter().any(|e| ip.starts_with(e))
+            }));
+        }
+
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
+            .with_setting_engine(setting)
             .build();
         RtcEngine { api }
     }
@@ -129,7 +158,7 @@ impl RtcEngine {
 
 impl Default for RtcEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(&crate::config::RTCConfig::default())
     }
 }
 
@@ -880,12 +909,17 @@ pub async fn ensure_publisher(
             if s == webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected
                 && p6.set_state(crate::participant::ParticipantState::Active)
             {
-                // First time the media plane is up: record session join latency.
-                if let Some(ctx) = p6.room().and_then(|r| r.context()) {
-                    ctx.metrics
-                        .session_join_latency
-                        .with_label_values(&["0"])
-                        .observe(p6.session_age_ms() as f64);
+                // First time the media plane is up: record session join latency
+                // and broadcast the Active transition so subscribers (and the
+                // agent's wait_for_participant) see the participant as active.
+                if let Some(room) = p6.room() {
+                    if let Some(ctx) = room.context() {
+                        ctx.metrics
+                            .session_join_latency
+                            .with_label_values(&["0"])
+                            .observe(p6.session_age_ms() as f64);
+                    }
+                    room.broadcast_participant_update(vec![p6.to_proto()], Some(&p6.sid));
                 }
             }
             Box::pin(async {})
