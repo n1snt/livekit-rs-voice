@@ -1,21 +1,27 @@
 //! Object-storage upload of finished recordings (S3-compatible: AWS S3,
-//! Cloudflare R2, MinIO, ...). The Go egress uploads after recording with a
-//! primary + backup uploader; this voice-only recorder uploads to one resolved
-//! destination once the file is finalized.
+//! Cloudflare R2, MinIO, ...; Google Cloud Storage; Azure Blob). The Go egress
+//! uploads after recording with a primary + backup uploader; this voice-only
+//! recorder uploads to one resolved destination once the file is finalized.
 
 use std::collections::HashMap;
 
 use object_store::aws::AmazonS3Builder;
+use object_store::azure::MicrosoftAzureBuilder;
+use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path;
 use object_store::{Attribute, Attributes, ObjectStore, PutMode, PutOptions, TagSet};
 
-/// A resolved upload destination: local filesystem or S3-compatible object
-/// storage. Request-level upload config wins; the container `s3:` config is the
-/// default; otherwise recordings stay local.
+use crate::sts;
+
+/// A resolved upload destination. Request-level upload config wins; the
+/// container config (`s3:`/`gcp:`/`azure:`) is the default; otherwise
+/// recordings stay local.
 #[derive(Debug, Clone)]
 pub enum Destination {
     Local,
     S3(Box<S3Target>),
+    Gcp(Box<GcpTarget>),
+    Azure(Box<AzureTarget>),
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +35,28 @@ pub struct S3Target {
     pub force_path_style: bool,
     pub metadata: HashMap<String, String>,
     pub tagging: String,
+    pub content_disposition: String,
+    pub assume_role_arn: String,
+    pub assume_role_external_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcpTarget {
+    pub credentials: String,
+    pub bucket: String,
+    pub metadata: HashMap<String, String>,
+    pub tagging: String,
+    pub content_disposition: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AzureTarget {
+    pub account_name: String,
+    pub account_key: String,
+    pub container_name: String,
+    pub metadata: HashMap<String, String>,
+    pub tagging: String,
+    pub content_disposition: String,
 }
 
 /// Uploads a finished recording. Returns the `(location, size)` pair reported
@@ -51,22 +79,59 @@ pub async fn upload(
             let location = put_s3(s3.as_ref(), key, bytes).await?;
             Ok((location, size))
         }
+        Destination::Gcp(g) => {
+            let bytes = tokio::fs::read(local_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            let location = put_gcp(g.as_ref(), key, bytes).await?;
+            Ok((location, size))
+        }
+        Destination::Azure(a) => {
+            let bytes = tokio::fs::read(local_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            let location = put_azure(a.as_ref(), key, bytes).await?;
+            Ok((location, size))
+        }
     }
 }
 
 async fn put_s3(s3: &S3Target, key: &str, bytes: Vec<u8>) -> Result<String, String> {
-    let region = if s3.region.is_empty() {
+    let (access_key, secret, session_token) = if !s3.assume_role_arn.is_empty() {
+        let temp = sts::assume_role(
+            &s3.access_key,
+            &s3.secret,
+            &s3.session_token,
+            &s3.region,
+            &s3.assume_role_arn,
+            &s3.assume_role_external_id,
+        )
+        .await?;
+        (
+            temp.access_key_id,
+            temp.secret_access_key,
+            temp.session_token,
+        )
+    } else {
+        (
+            s3.access_key.clone(),
+            s3.secret.clone(),
+            s3.session_token.clone(),
+        )
+    };
+
+    let region = if s3.region.is_empty() || s3.region == "auto" {
         "auto".to_string()
     } else {
         s3.region.clone()
     };
     let mut builder = AmazonS3Builder::new()
         .with_bucket_name(&s3.bucket)
-        .with_access_key_id(&s3.access_key)
-        .with_secret_access_key(&s3.secret)
+        .with_access_key_id(&access_key)
+        .with_secret_access_key(&secret)
         .with_region(region);
-    if !s3.session_token.is_empty() {
-        builder = builder.with_token(&s3.session_token);
+    if !session_token.is_empty() {
+        builder = builder.with_token(&session_token);
     }
     if !s3.endpoint.is_empty() {
         builder = builder.with_endpoint(&s3.endpoint).with_allow_http(true);
@@ -76,25 +141,103 @@ async fn put_s3(s3: &S3Target, key: &str, bytes: Vec<u8>) -> Result<String, Stri
     }
     let store = builder.build().map_err(|e| format!("s3 config: {e}"))?;
     let path = Path::from(key);
-    let mut tags = TagSet::default();
-    for (k, v) in parse_tagging(&s3.tagging) {
-        tags.push(&k, &v);
-    }
-    let mut attributes = Attributes::new();
-    for (k, v) in &s3.metadata {
-        attributes.insert(Attribute::Metadata(k.clone().into()), v.clone().into());
-    }
-    let opts = PutOptions {
-        mode: PutMode::Overwrite,
-        tags,
-        attributes,
-        ..Default::default()
-    };
+    let opts = put_options(
+        &s3.metadata,
+        &s3.tagging,
+        &s3.content_disposition,
+        content_type_for(key),
+    );
     store
         .put_opts(&path, bytes.into(), opts)
         .await
         .map_err(|e| format!("s3 upload {key}: {e}"))?;
     Ok(object_url(s3, key))
+}
+
+async fn put_gcp(g: &GcpTarget, key: &str, bytes: Vec<u8>) -> Result<String, String> {
+    let store = GoogleCloudStorageBuilder::new()
+        .with_bucket_name(&g.bucket)
+        .with_service_account_key(&g.credentials)
+        .build()
+        .map_err(|e| format!("gcp config: {e}"))?;
+    let path = Path::from(key);
+    let opts = put_options(
+        &g.metadata,
+        &g.tagging,
+        &g.content_disposition,
+        content_type_for(key),
+    );
+    store
+        .put_opts(&path, bytes.into(), opts)
+        .await
+        .map_err(|e| format!("gcp upload {key}: {e}"))?;
+    Ok(format!("https://storage.googleapis.com/{}/{key}", g.bucket))
+}
+
+async fn put_azure(a: &AzureTarget, key: &str, bytes: Vec<u8>) -> Result<String, String> {
+    let store = MicrosoftAzureBuilder::new()
+        .with_account(&a.account_name)
+        .with_access_key(&a.account_key)
+        .with_container_name(&a.container_name)
+        .build()
+        .map_err(|e| format!("azure config: {e}"))?;
+    let path = Path::from(key);
+    let opts = put_options(
+        &a.metadata,
+        &a.tagging,
+        &a.content_disposition,
+        content_type_for(key),
+    );
+    store
+        .put_opts(&path, bytes.into(), opts)
+        .await
+        .map_err(|e| format!("azure upload {key}: {e}"))?;
+    Ok(format!(
+        "https://{}.blob.core.windows.net/{}/{key}",
+        a.account_name, a.container_name
+    ))
+}
+
+fn put_options(
+    metadata: &HashMap<String, String>,
+    tagging: &str,
+    content_disposition: &str,
+    content_type: Option<&str>,
+) -> PutOptions {
+    let mut tags = TagSet::default();
+    for (k, v) in parse_tagging(tagging) {
+        tags.push(&k, &v);
+    }
+    let mut attributes = Attributes::new();
+    for (k, v) in metadata {
+        attributes.insert(Attribute::Metadata(k.clone().into()), v.clone().into());
+    }
+    if !content_disposition.is_empty() {
+        attributes.insert(
+            Attribute::ContentDisposition,
+            content_disposition.to_string().into(),
+        );
+    }
+    if let Some(ct) = content_type {
+        attributes.insert(Attribute::ContentType, ct.to_string().into());
+    }
+    PutOptions {
+        mode: PutMode::Overwrite,
+        tags,
+        attributes,
+        ..Default::default()
+    }
+}
+
+/// The MIME type for a recording key, when known.
+fn content_type_for(key: &str) -> Option<&'static str> {
+    if key.ends_with(".mp3") {
+        Some("audio/mpeg")
+    } else if key.ends_with(".wav") {
+        Some("audio/wav")
+    } else {
+        None
+    }
 }
 
 /// Parses the S3 `x-amz-tagging` header format (`k1=v1&k2=v2`) into a map.
@@ -151,6 +294,9 @@ mod tests {
             force_path_style: false,
             metadata: HashMap::new(),
             tagging: String::new(),
+            content_disposition: String::new(),
+            assume_role_arn: String::new(),
+            assume_role_external_id: String::new(),
         };
         assert_eq!(
             object_url(&s3, "EG_1.wav"),
@@ -176,10 +322,20 @@ mod tests {
             force_path_style: false,
             metadata: HashMap::new(),
             tagging: String::new(),
+            content_disposition: String::new(),
+            assume_role_arn: String::new(),
+            assume_role_external_id: String::new(),
         };
         assert_eq!(
             object_url(&s3, "EG_1.mp3"),
             "https://voice-ai-recordings.s3.ap-south-1.amazonaws.com/EG_1.mp3"
         );
+    }
+
+    #[test]
+    fn content_type_by_extension() {
+        assert_eq!(content_type_for("a.mp3"), Some("audio/mpeg"));
+        assert_eq!(content_type_for("a.wav"), Some("audio/wav"));
+        assert_eq!(content_type_for("a.bin"), None);
     }
 }

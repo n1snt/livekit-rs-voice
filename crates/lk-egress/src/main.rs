@@ -5,6 +5,12 @@
 use std::sync::Arc;
 
 use lk_psrpc::{RedisBus, RedisConfig};
+use serde_json::{json, Map, Value};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 
 use lk_egress::config::{load_config_from_yaml, EgressConfig};
@@ -68,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| EnvFilter::new(config.effective_log_level()));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
+        .event_format(JsonEventFormatter)
         .init();
 
     // Go egress keys with no voice-only-recorder equivalent: accepted, unused.
@@ -101,4 +107,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Renders events as JSON with a lowercase `level`, matching the reference zap
+/// logs so the promtail json stage extracts a `level` label (identical to the
+/// `livekit-voice` server's formatter).
+#[derive(Default)]
+struct JsonEventFormatter;
+
+/// Collects an event's fields into a JSON object.
+struct FieldCollector<'a>(&'a mut Map<String, Value>);
+
+impl Visit for FieldCollector<'_> {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.0
+            .insert(field.name().into(), Value::String(value.into()));
+    }
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().into(), Value::String(format!("{value:?}")));
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.0.insert(field.name().into(), json!(value));
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.0.insert(field.name().into(), json!(value));
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.0.insert(field.name().into(), json!(value));
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.0.insert(field.name().into(), Value::Bool(value));
+    }
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.0
+            .insert(field.name().into(), Value::String(value.to_string()));
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for JsonEventFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        let mut fields = Map::new();
+        event.record(&mut FieldCollector(&mut fields));
+        let message = fields.remove("message").unwrap_or(Value::Null);
+        let level = match *event.metadata().level() {
+            tracing::Level::TRACE => "trace",
+            tracing::Level::DEBUG => "debug",
+            tracing::Level::INFO => "info",
+            tracing::Level::WARN => "warn",
+            tracing::Level::ERROR => "error",
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let mut obj = Map::new();
+        obj.insert("level".into(), Value::String(level.into()));
+        obj.insert("ts".into(), json!(ts));
+        obj.insert(
+            "target".into(),
+            Value::String(event.metadata().target().into()),
+        );
+        obj.insert("msg".into(), message);
+        obj.extend(fields);
+        writeln!(writer, "{}", Value::Object(obj))
+    }
 }

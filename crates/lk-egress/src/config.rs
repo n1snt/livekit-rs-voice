@@ -33,12 +33,26 @@ pub struct EgressConfig {
     /// Default S3 (S3-compatible) upload destination. Request-level upload
     /// config overrides this.
     pub s3: Option<S3Config>,
+    /// Default GCP upload destination.
+    pub gcp: Option<GcpConfig>,
+    /// Default Azure upload destination.
+    pub azure: Option<AzureConfig>,
+    /// Default AliOSS upload destination (parsed; AliOSS uploads are not
+    /// supported on the voice-only recorder).
+    pub alioss: Option<AliOssConfig>,
     /// Go egress's `insecure` (web-egress Chrome flags). The voice-only
     /// recorder never runs Chrome, so this is accepted and unused.
     pub insecure: bool,
     /// Go egress's `cpu_cost` job-admission costs. The voice-only recorder has
     /// no admission gating, so this is accepted and unused.
     pub cpu_cost: Option<CpuCostConfig>,
+    /// Base credentials used to assume `s3.assume_role_arn` when the request
+    /// or config provides no access key (Go egress parity).
+    pub s3_assume_role_key: String,
+    pub s3_assume_role_secret: String,
+    /// Default role to assume for S3 uploads when the request does not set one.
+    pub s3_assume_role_arn: String,
+    pub s3_assume_role_external_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -62,6 +76,57 @@ pub struct S3Config {
     pub metadata: HashMap<String, String>,
     pub tagging: String,
     pub content_disposition: String,
+    pub assume_role_arn: String,
+    pub assume_role_external_id: String,
+    /// Parsed and rejected (not silently ignored): object_store has no HTTP
+    /// proxy support.
+    pub proxy: Option<ProxyConfig>,
+}
+
+/// Default GCP upload target (`gcp:` block): a serialized service-account
+/// credentials JSON plus the bucket.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct GcpConfig {
+    pub credentials: String,
+    pub bucket: String,
+    pub metadata: HashMap<String, String>,
+    pub tagging: String,
+    pub content_disposition: String,
+}
+
+/// Default Azure upload target (`azure:` block).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct AzureConfig {
+    pub account_name: String,
+    pub account_key: String,
+    pub container_name: String,
+    pub metadata: HashMap<String, String>,
+    pub tagging: String,
+    pub content_disposition: String,
+}
+
+/// AliOSS default (`alioss:` block). Parsed; uploads are rejected with a clear
+/// error on the voice-only recorder.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct AliOssConfig {
+    pub access_key: String,
+    pub secret: String,
+    pub region: String,
+    pub endpoint: String,
+    pub bucket: String,
+}
+
+/// HTTP proxy for S3 uploads (Go `ProxyConfig`). Parsed and rejected: the
+/// uploader has no proxy support.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ProxyConfig {
+    pub url: String,
+    pub username: String,
+    pub password: String,
 }
 
 /// Go egress job-admission CPU costs (`cpu_cost:` block). Parsed so the key is
@@ -87,8 +152,15 @@ impl Default for EgressConfig {
             },
             log_level: String::new(),
             s3: None,
+            gcp: None,
+            azure: None,
+            alioss: None,
             insecure: false,
             cpu_cost: None,
+            s3_assume_role_key: String::new(),
+            s3_assume_role_secret: String::new(),
+            s3_assume_role_arn: String::new(),
+            s3_assume_role_external_id: String::new(),
         }
     }
 }
@@ -148,6 +220,23 @@ s3:
   region: auto
   bucket: voice-ai-recordings
   endpoint: https://example.r2.cloudflarestorage.com
+  content_disposition: attachment
+  assume_role_arn: arn:aws:iam::123:role/uploader
+s3_assume_role_key: base-key
+s3_assume_role_secret: base-secret
+gcp:
+  credentials: '{"type":"service_account"}'
+  bucket: gcp-recordings
+azure:
+  account_name: acct
+  account_key: key
+  container_name: recordings
+alioss:
+  access_key: a
+  secret: s
+  region: cn-hangzhou
+  endpoint: https://oss-cn-hangzhou.aliyuncs.com
+  bucket: alios-bucket
 redis:
   address: 127.0.0.1:6379
 "#,
@@ -160,6 +249,15 @@ redis:
         assert_eq!(s3.bucket, "voice-ai-recordings");
         assert_eq!(s3.endpoint, "https://example.r2.cloudflarestorage.com");
         assert_eq!(s3.region, "auto");
+        assert_eq!(s3.content_disposition, "attachment");
+        assert_eq!(s3.assume_role_arn, "arn:aws:iam::123:role/uploader");
+        assert_eq!(cfg.s3_assume_role_key, "base-key");
+        let gcp = cfg.gcp.unwrap();
+        assert_eq!(gcp.bucket, "gcp-recordings");
+        let azure = cfg.azure.unwrap();
+        assert_eq!(azure.container_name, "recordings");
+        let alioss = cfg.alioss.unwrap();
+        assert_eq!(alioss.bucket, "alios-bucket");
     }
 
     #[test]

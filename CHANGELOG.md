@@ -18,6 +18,10 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 ### Added
 
 - `livekit-egress` can now upload finished recordings to S3-compatible object storage (AWS S3, Cloudflare R2, MinIO) via the new `s3:` config block or per-request `EncodedFileOutput.s3`/`StorageConfig` upload config. `FileInfo.filename` is the storage key and `FileInfo.location` the object URL, matching the reference `livekit/egress`. GCP/Azure/AliOSS uploads return a clear "not supported" error instead of being ignored.
+- S3 uploads also support `assume_role_arn`/`assume_role_external_id` (STS `AssumeRole` with temporary credentials; base keys fall back to the new `s3_assume_role_key`/`s3_assume_role_secret` config), `content_disposition`, `metadata`, `tagging`, and the MIME content type. GCP (`gcp:` block / request `gcp`) and Azure (`azure:` block / request `azure`) uploads are now supported too; `proxy` and `alioss` are parsed and rejected with a clear error instead of being silently ignored.
+- Request-level advanced encoding options (`audio_bitrate`) now override the config `mp3_bitrate`.
+- The recorder reports an `EGRESS_ACTIVE` update after connecting, so the server fires the reference `egress_updated` webhook during a recording (previously only `egress_started` and `egress_ended` fired).
+- `livekit-egress` now logs structured JSON with a lowercase `level`, matching the server and the reference Go logs.
 - `livekit-voice` now sends the reference `egress_started` / `egress_updated` / `egress_ended` webhooks when the recorder reports egress state (`CreateEgress`/`UpdateEgress`), with `started`/`ended` deduped per egress id.
 - `livekit-egress` config accepts the Go `livekit/egress` keys so the same `egress.yaml` works unchanged: `s3` (default upload destination), `log_level` (top-level alias for `logging.level`), `insecure` and `cpu_cost` (parsed and logged as accepted-but-unused on the voice-only recorder, matching Go where they only affect web egress / job admission).
 

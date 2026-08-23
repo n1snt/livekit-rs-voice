@@ -15,7 +15,7 @@ use crate::client;
 use crate::config::EgressConfig;
 use crate::io::IoClient;
 use crate::recorder::{self, OutputFormat};
-use crate::upload::{self, Destination, S3Target};
+use crate::upload::{self, AzureTarget, Destination, GcpTarget, S3Target};
 
 type Stops = Arc<Mutex<HashMap<String, watch::Sender<bool>>>>;
 type Infos = Arc<Mutex<HashMap<String, lk::EgressInfo>>>;
@@ -80,6 +80,8 @@ struct RecSpec {
     format: OutputFormat,
     destination: Destination,
     filepath: String,
+    /// Request-level audio bitrate (kbps); 0 = use the config default.
+    bitrate: i32,
 }
 
 fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpec, String> {
@@ -101,6 +103,12 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
                 format,
                 destination,
                 filepath,
+                bitrate: match &r.options {
+                    Some(lk::room_composite_egress_request::Options::Advanced(o)) => {
+                        o.audio_bitrate
+                    }
+                    _ => 0,
+                },
             })
         }
         Some(rpc::start_egress_request::Request::Track(r)) => match &r.output {
@@ -109,6 +117,7 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
                 format: OutputFormat::Wav,
                 destination: direct_destination(f, conf)?,
                 filepath: f.filepath.clone(),
+                bitrate: 0,
             }),
             _ => {
                 let (format, destination, filepath) = default(conf)?;
@@ -117,6 +126,7 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
                     format,
                     destination,
                     filepath,
+                    bitrate: 0,
                 })
             }
         },
@@ -130,6 +140,7 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
                 format,
                 destination,
                 filepath,
+                bitrate: 0,
             })
         }
         Some(rpc::start_egress_request::Request::TrackComposite(r)) => {
@@ -146,6 +157,7 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
                 format,
                 destination,
                 filepath,
+                bitrate: 0,
             })
         }
         Some(rpc::start_egress_request::Request::Egress(r)) => {
@@ -171,6 +183,7 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
                 format,
                 destination,
                 filepath,
+                bitrate: 0,
             })
         }
         _ => Err("web/replay egress is not supported on the voice-only recorder".to_string()),
@@ -178,16 +191,18 @@ fn rec_spec(req: &rpc::StartEgressRequest, conf: &EgressConfig) -> Result<RecSpe
 }
 
 /// Maps an `EncodedFileOutput` to (format, upload destination, storage key).
-/// Request-level S3 upload config wins; otherwise the container `s3:` default;
-/// otherwise local.
+/// Request-level upload config wins; otherwise the container default
+/// (`s3:`/`gcp:`/`azure:`); otherwise local.
 fn encoded_spec(
     f: &lk::EncodedFileOutput,
     conf: &EgressConfig,
 ) -> Result<(OutputFormat, Destination, String), String> {
     let format = encoded_format(f.file_type);
     let destination = match &f.output {
-        Some(lk::encoded_file_output::Output::S3(s3)) => Ok(s3_destination(s3)),
-        Some(_) => Err(unsupported_upload()),
+        Some(lk::encoded_file_output::Output::S3(s3)) => s3_destination(s3, conf),
+        Some(lk::encoded_file_output::Output::Gcp(g)) => gcp_destination(g),
+        Some(lk::encoded_file_output::Output::Azure(a)) => Ok(azure_destination(a)),
+        Some(lk::encoded_file_output::Output::AliOss(_)) => Err(unsupported_alioss()),
         None => conf_default(conf),
     }?;
     Ok((format, destination, f.filepath.clone()))
@@ -199,8 +214,10 @@ fn direct_destination(
     conf: &EgressConfig,
 ) -> Result<Destination, String> {
     match &f.output {
-        Some(lk::direct_file_output::Output::S3(s3)) => Ok(s3_destination(s3)),
-        Some(_) => Err(unsupported_upload()),
+        Some(lk::direct_file_output::Output::S3(s3)) => s3_destination(s3, conf),
+        Some(lk::direct_file_output::Output::Gcp(g)) => gcp_destination(g),
+        Some(lk::direct_file_output::Output::Azure(a)) => Ok(azure_destination(a)),
+        Some(lk::direct_file_output::Output::AliOss(_)) => Err(unsupported_alioss()),
         None => conf_default(conf),
     }
 }
@@ -208,20 +225,43 @@ fn direct_destination(
 /// Upload destination from a `StartEgressRequest` request-level `StorageConfig`.
 fn storage_destination(s: &lk::StorageConfig, conf: &EgressConfig) -> Result<Destination, String> {
     match &s.provider {
-        Some(lk::storage_config::Provider::S3(s3)) => Ok(s3_destination(s3)),
-        Some(_) => Err(unsupported_upload()),
+        Some(lk::storage_config::Provider::S3(s3)) => s3_destination(s3, conf),
+        Some(lk::storage_config::Provider::Gcp(g)) => gcp_destination(g),
+        Some(lk::storage_config::Provider::Azure(a)) => Ok(azure_destination(a)),
+        Some(lk::storage_config::Provider::AliOss(_)) => Err(unsupported_alioss()),
         None => conf_default(conf),
     }
 }
 
-fn unsupported_upload() -> String {
-    "gcp/azure/aliOSS upload is not supported on the voice-only recorder".to_string()
+fn unsupported_alioss() -> String {
+    "aliOSS upload is not supported on the voice-only recorder".to_string()
 }
 
-fn s3_destination(s3: &lk::S3Upload) -> Destination {
-    Destination::S3(Box::new(S3Target {
-        access_key: s3.access_key.clone(),
-        secret: s3.secret.clone(),
+fn s3_destination(s3: &lk::S3Upload, conf: &EgressConfig) -> Result<Destination, String> {
+    if s3.proxy.is_some() {
+        return Err("s3 proxy is not supported on the voice-only recorder".to_string());
+    }
+    let assume_role_arn = if s3.assume_role_arn.is_empty() {
+        conf.s3_assume_role_arn.clone()
+    } else {
+        s3.assume_role_arn.clone()
+    };
+    let assume_role_external_id = if s3.assume_role_external_id.is_empty() {
+        conf.s3_assume_role_external_id.clone()
+    } else {
+        s3.assume_role_external_id.clone()
+    };
+    let (access_key, secret) = if !assume_role_arn.is_empty() && s3.access_key.is_empty() {
+        (
+            conf.s3_assume_role_key.clone(),
+            conf.s3_assume_role_secret.clone(),
+        )
+    } else {
+        (s3.access_key.clone(), s3.secret.clone())
+    };
+    Ok(Destination::S3(Box::new(S3Target {
+        access_key,
+        secret,
         session_token: s3.session_token.clone(),
         region: s3.region.clone(),
         endpoint: s3.endpoint.clone(),
@@ -233,15 +273,64 @@ fn s3_destination(s3: &lk::S3Upload) -> Destination {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         tagging: s3.tagging.clone(),
+        content_disposition: s3.content_disposition.clone(),
+        assume_role_arn,
+        assume_role_external_id,
+    })))
+}
+
+fn gcp_destination(g: &lk::GcpUpload) -> Result<Destination, String> {
+    if g.proxy.is_some() {
+        return Err("gcp proxy is not supported on the voice-only recorder".to_string());
+    }
+    Ok(Destination::Gcp(Box::new(GcpTarget {
+        credentials: g.credentials.clone(),
+        bucket: g.bucket.clone(),
+        metadata: HashMap::new(),
+        tagging: String::new(),
+        content_disposition: String::new(),
+    })))
+}
+
+fn azure_destination(a: &lk::AzureBlobUpload) -> Destination {
+    Destination::Azure(Box::new(AzureTarget {
+        account_name: a.account_name.clone(),
+        account_key: a.account_key.clone(),
+        container_name: a.container_name.clone(),
+        metadata: HashMap::new(),
+        tagging: String::new(),
+        content_disposition: String::new(),
     }))
 }
 
-/// The container-config upload default (`s3:` block), or local storage.
+/// The container-config upload default (`s3:`/`gcp:`/`azure:`), or local
+/// storage. `alioss:` is parsed but rejected.
 fn conf_default(conf: &EgressConfig) -> Result<Destination, String> {
-    Ok(match &conf.s3 {
-        Some(c) => Destination::S3(Box::new(S3Target {
-            access_key: c.access_key.clone(),
-            secret: c.secret.clone(),
+    if let Some(c) = &conf.s3 {
+        if c.proxy.is_some() {
+            return Err("s3 proxy is not supported on the voice-only recorder".to_string());
+        }
+        let assume_role_arn = if c.assume_role_arn.is_empty() {
+            conf.s3_assume_role_arn.clone()
+        } else {
+            c.assume_role_arn.clone()
+        };
+        let assume_role_external_id = if c.assume_role_external_id.is_empty() {
+            conf.s3_assume_role_external_id.clone()
+        } else {
+            c.assume_role_external_id.clone()
+        };
+        let (access_key, secret) = if !assume_role_arn.is_empty() && c.access_key.is_empty() {
+            (
+                conf.s3_assume_role_key.clone(),
+                conf.s3_assume_role_secret.clone(),
+            )
+        } else {
+            (c.access_key.clone(), c.secret.clone())
+        };
+        return Ok(Destination::S3(Box::new(S3Target {
+            access_key,
+            secret,
             session_token: c.session_token.clone(),
             region: c.region.clone(),
             endpoint: c.endpoint.clone(),
@@ -249,9 +338,34 @@ fn conf_default(conf: &EgressConfig) -> Result<Destination, String> {
             force_path_style: c.force_path_style,
             metadata: c.metadata.clone(),
             tagging: c.tagging.clone(),
-        })),
-        None => Destination::Local,
-    })
+            content_disposition: c.content_disposition.clone(),
+            assume_role_arn,
+            assume_role_external_id,
+        })));
+    }
+    if let Some(g) = &conf.gcp {
+        return Ok(Destination::Gcp(Box::new(GcpTarget {
+            credentials: g.credentials.clone(),
+            bucket: g.bucket.clone(),
+            metadata: g.metadata.clone(),
+            tagging: g.tagging.clone(),
+            content_disposition: g.content_disposition.clone(),
+        })));
+    }
+    if let Some(a) = &conf.azure {
+        return Ok(Destination::Azure(Box::new(AzureTarget {
+            account_name: a.account_name.clone(),
+            account_key: a.account_key.clone(),
+            container_name: a.container_name.clone(),
+            metadata: a.metadata.clone(),
+            tagging: a.tagging.clone(),
+            content_disposition: a.content_disposition.clone(),
+        })));
+    }
+    if conf.alioss.is_some() {
+        return Err(unsupported_alioss());
+    }
+    Ok(Destination::Local)
 }
 
 /// Maps an `EncodedFileType` to an output format. Voice-only: MP3 stays MP3,
@@ -401,6 +515,11 @@ async fn run_one(
         "wav"
     };
     let local = format!("{}/{egress_id}.{ext}", conf.output_dir);
+    let bitrate = if spec.bitrate > 0 {
+        spec.bitrate
+    } else {
+        conf.mp3_bitrate
+    };
     tracing::info!(egress_id, room = %spec.room, "starting recording");
     let audio = client::connect(
         &conf.api_key,
@@ -411,22 +530,33 @@ async fn run_one(
     )
     .await?;
     tracing::info!(egress_id, room = %spec.room, "connected; recording");
-    let frames = recorder::run_recording(
-        audio,
-        &local,
-        spec.format,
-        conf.mp3_bitrate,
-        stop_rx.clone(),
-    )
-    .await?;
-    let size = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
-    // Upload the finished file; `location` becomes FileInfo.location.
-    let key = storage_key(&spec.filepath, egress_id, ext);
-    let (location, _) = upload::upload(&local, &key, &spec.destination).await?;
+
+    // Report ACTIVE so the server fires the reference `egress_updated` webhook.
     let request = lk::egress_info::Request::RoomComposite(lk::RoomCompositeEgressRequest {
         room_name: spec.room.clone(),
         ..Default::default()
     });
+    let active = lk::EgressInfo {
+        egress_id: egress_id.to_string(),
+        room_name: spec.room.clone(),
+        status: lk::EgressStatus::EgressActive as i32,
+        started_at: crate::now_secs(),
+        updated_at: crate::now_secs(),
+        request: Some(request.clone()),
+        ..Default::default()
+    };
+    let _ = ctx.io.update_egress(&active).await;
+    ctx.infos
+        .lock()
+        .unwrap()
+        .insert(egress_id.to_string(), active);
+
+    let frames =
+        recorder::run_recording(audio, &local, spec.format, bitrate, stop_rx.clone()).await?;
+    let size = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+    // Upload the finished file; `location` becomes FileInfo.location.
+    let key = storage_key(&spec.filepath, egress_id, ext);
+    let (location, _) = upload::upload(&local, &key, &spec.destination).await?;
     let info = recorder::finished_info(
         egress_id, &spec.room, &key, &location, request, frames, size,
     );
@@ -451,5 +581,161 @@ fn storage_key(filepath: &str, egress_id: &str, ext: &str) -> String {
         filepath.to_string()
     } else {
         format!("{filepath}.{ext}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_config_from_yaml;
+
+    #[test]
+    fn storage_key_defaults_and_appends_extension() {
+        assert_eq!(storage_key("", "EG_1", "wav"), "EG_1.wav");
+        assert_eq!(storage_key("sub/rec", "EG_1", "mp3"), "sub/rec.mp3");
+        assert_eq!(storage_key("sub/rec.mp3", "EG_1", "mp3"), "sub/rec.mp3");
+    }
+
+    #[test]
+    fn config_default_resolves_gcp_and_azure() {
+        let conf = load_config_from_yaml(
+            r#"
+api_key: k
+api_secret: s
+ws_url: ws://x
+gcp:
+  credentials: '{"type":"service_account"}'
+  bucket: g-bucket
+"#,
+        )
+        .unwrap();
+        assert!(matches!(conf_default(&conf).unwrap(), Destination::Gcp(_)));
+
+        let conf = load_config_from_yaml(
+            r#"
+api_key: k
+api_secret: s
+ws_url: ws://x
+azure:
+  account_name: acct
+  account_key: key
+  container_name: cont
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            conf_default(&conf).unwrap(),
+            Destination::Azure(_)
+        ));
+
+        let conf = EgressConfig::default();
+        assert!(matches!(conf_default(&conf).unwrap(), Destination::Local));
+    }
+
+    #[test]
+    fn config_default_rejects_alioss_and_proxy() {
+        let conf = load_config_from_yaml(
+            r#"
+api_key: k
+api_secret: s
+ws_url: ws://x
+alioss:
+  access_key: a
+  secret: b
+  bucket: c
+"#,
+        )
+        .unwrap();
+        assert!(conf_default(&conf).unwrap_err().contains("aliOSS"));
+
+        let conf = load_config_from_yaml(
+            r#"
+api_key: k
+api_secret: s
+ws_url: ws://x
+s3:
+  access_key: a
+  secret: b
+  bucket: c
+  proxy:
+    url: http://proxy:8080
+"#,
+        )
+        .unwrap();
+        assert!(conf_default(&conf).unwrap_err().contains("proxy"));
+    }
+
+    #[test]
+    fn request_s3_destination_applies_assume_role_defaults() {
+        let conf = load_config_from_yaml(
+            r#"
+api_key: k
+api_secret: s
+ws_url: ws://x
+s3_assume_role_key: base-key
+s3_assume_role_secret: base-secret
+s3_assume_role_arn: arn:aws:iam::123:role/default
+"#,
+        )
+        .unwrap();
+        let mut req = lk::S3Upload {
+            bucket: "b".into(),
+            ..Default::default()
+        };
+        // Request sets no arn and no keys → config arn + config base keys.
+        let dest = s3_destination(&req, &conf).unwrap();
+        let Destination::S3(t) = dest else {
+            panic!("expected s3");
+        };
+        assert_eq!(t.assume_role_arn, "arn:aws:iam::123:role/default");
+        assert_eq!(t.access_key, "base-key");
+        assert_eq!(t.secret, "base-secret");
+
+        // Request-level arn wins over the config default.
+        req.assume_role_arn = "arn:aws:iam::123:role/requested".into();
+        req.access_key = "req-key".into();
+        let dest = s3_destination(&req, &conf).unwrap();
+        let Destination::S3(t) = dest else {
+            panic!("expected s3");
+        };
+        assert_eq!(t.assume_role_arn, "arn:aws:iam::123:role/requested");
+        assert_eq!(t.access_key, "req-key");
+    }
+
+    #[test]
+    fn request_s3_proxy_is_rejected() {
+        let conf = EgressConfig::default();
+        let req = lk::S3Upload {
+            bucket: "b".into(),
+            proxy: Some(lk::ProxyConfig {
+                url: "http://proxy:8080".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(s3_destination(&req, &conf).unwrap_err().contains("proxy"));
+    }
+
+    #[test]
+    fn request_audio_bitrate_flows_into_spec() {
+        let mut req = rpc::StartEgressRequest {
+            egress_id: "EG_1".into(),
+            ..Default::default()
+        };
+        req.request = Some(rpc::start_egress_request::Request::RoomComposite(
+            lk::RoomCompositeEgressRequest {
+                room_name: "room".into(),
+                options: Some(lk::room_composite_egress_request::Options::Advanced(
+                    lk::EncodingOptions {
+                        audio_bitrate: 128,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        ));
+        let conf = EgressConfig::default();
+        let spec = rec_spec(&req, &conf).unwrap();
+        assert_eq!(spec.bitrate, 128);
     }
 }

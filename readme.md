@@ -30,7 +30,7 @@ One tag releases both; see [docs/versioning.md](docs/versioning.md) for the tag/
 - **Audio only** (video tracks are rejected).
 - **Multi-node over Redis** (`redis.cluster: true`); does not interoperate with Go `livekit-server` nodes.
 - **SIP** interoperates with the `livekit/sip` container over Redis (psrpc).
-- **Egress** is served by the in-repo `livekit-egress` recorder over Redis (psrpc), instead of the `livekit/egress` container. It records WAV/MP3 and can upload to S3-compatible storage (`s3:` config or per-request upload config); the Go `cpu_cost`/`insecure` config keys are accepted but unused (no web egress or job-admission gating).
+- **Egress** is served by the in-repo `livekit-egress` recorder over Redis (psrpc), instead of the `livekit/egress` container. It records WAV/MP3 and uploads to S3-compatible storage (with STS assume-role), GCP, or Azure via `s3:`/`gcp:`/`azure:` config or per-request upload config; AliOSS and S3 proxies are rejected with a clear error, and the Go `cpu_cost`/`insecure` config keys are accepted but unused (no web egress or job-admission gating).
 - **Webhooks** signed with `X-Livekit-Signature: hex(HMAC-SHA256(...))`.
 - **Metrics** are drop-in compatible with `livekit-server` (`metrics.rs`).
 
