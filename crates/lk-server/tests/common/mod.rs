@@ -296,6 +296,25 @@ pub async fn await_message<F: Fn(&lk::SignalResponse) -> bool>(
     panic!("timed out waiting for expected signal response");
 }
 
+/// Reads until the predicate matches, returning `None` if nothing matches
+/// within `timeout` (used to assert an event is NOT delivered).
+pub async fn try_await_message<F: Fn(&lk::SignalResponse) -> bool>(
+    ws: &mut Ws,
+    matches: F,
+    timeout: std::time::Duration,
+) -> Option<lk::SignalResponse> {
+    loop {
+        match tokio::time::timeout(timeout, read_response(ws)).await {
+            Ok(resp) => {
+                if matches(&resp) {
+                    return Some(resp);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Spawns a background task that sends a ping every 2s so the server does not
 /// close the connection on its 15s ping timeout. Returns a handle; the task
 /// stops when the sender is dropped (i.e. the websocket closes).

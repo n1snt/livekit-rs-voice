@@ -53,7 +53,7 @@ pub fn audio_level_ext_id_from_sdp(sdp: &str) -> Option<u8> {
 pub struct AudioLevelDetector {
     level: AtomicU8,
     active: AtomicBool,
-    window: tokio::sync::Mutex<Window>,
+    window: std::sync::Mutex<Window>,
 }
 
 #[derive(Debug, Default)]
@@ -68,15 +68,16 @@ impl AudioLevelDetector {
         AudioLevelDetector {
             level: AtomicU8::new(127),
             active: AtomicBool::new(false),
-            window: tokio::sync::Mutex::new(Window::default()),
+            window: std::sync::Mutex::new(Window::default()),
         }
     }
 
     /// Observes one RTP packet. `level` is the raw dBov from the header
-    /// extension (127 = silence).
+    /// extension (127 = silence). A std Mutex (short critical section) is used
+    /// so per-packet observation never blocks an async executor.
     pub fn observe(&self, level: u8) {
         self.level.store(level, Ordering::Relaxed);
-        let mut window = self.window.blocking_lock();
+        let mut window = self.window.lock().unwrap();
         let now = Instant::now();
         if window
             .started
@@ -111,7 +112,7 @@ impl AudioLevelDetector {
     pub fn reset_if_stale(&self) {
         let now = Instant::now();
         let stale = {
-            let window = self.window.blocking_lock();
+            let window = self.window.lock().unwrap();
             window
                 .started
                 .map(|s| now.duration_since(s) >= UPDATE_INTERVAL * SMOOTH_INTERVALS)

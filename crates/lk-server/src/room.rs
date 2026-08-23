@@ -201,8 +201,12 @@ impl Room {
         }
         map.insert(participant.sid.clone(), participant.clone());
         drop(map);
-        self.ever_joined.store(true, Ordering::Relaxed);
-        *self.empty_since.lock().unwrap() = None;
+        // Dependent participants (egress/agent) do not count as a real join:
+        // they neither mark the room as ever-joined nor clear its empty-since.
+        if !participant.kind.is_dependent() {
+            self.ever_joined.store(true, Ordering::Relaxed);
+            *self.empty_since.lock().unwrap() = None;
+        }
         self.bump_version();
         participant.attach_room(Arc::downgrade(self));
         true

@@ -307,7 +307,9 @@ impl AgentManager {
     }
 
     pub fn delete_dispatch(&self, id: &str) -> Option<AgentDispatch> {
-        let mut d = self.dispatches.lock().unwrap().get_mut(id)?.clone();
+        // Remove from the registry so a deleted dispatch is never launched when
+        // its room is later created (launch_room_dispatches) or listed.
+        let mut d = self.dispatches.lock().unwrap().remove(id)?;
         d.deleted_at = Some(unix_seconds());
         Some(d)
     }
@@ -317,7 +319,7 @@ impl AgentManager {
             .lock()
             .unwrap()
             .values()
-            .filter(|d| d.room == room)
+            .filter(|d| d.room == room && d.deleted_at.is_none())
             .cloned()
             .collect()
     }
@@ -352,7 +354,12 @@ impl AgentManager {
     }
 
     pub fn get_dispatch(&self, id: &str) -> Option<AgentDispatch> {
-        self.dispatches.lock().unwrap().get(id).cloned()
+        self.dispatches
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .filter(|d| d.deleted_at.is_none())
     }
 }
 

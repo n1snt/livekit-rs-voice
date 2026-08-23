@@ -225,7 +225,10 @@ pub async fn handle_participant_request(participant: &Arc<Participant>, req: lk:
         }
         M::AddTrack(at) => handle_add_track(participant, at).await,
         M::Mute(mute) => {
-            set_track_muted(participant, &mute.sid, mute.muted, true).await;
+            // Client mutes its own track: from_server=false so the Mute is not
+            // echoed back to the initiator (it already knows); only the
+            // ParticipantUpdate broadcast to others carries the change.
+            set_track_muted(participant, &mute.sid, mute.muted, false).await;
         }
         M::Subscription(sub) => {
             handle_update_subscriptions(participant, sub).await;
@@ -297,8 +300,25 @@ async fn handle_answer(participant: &Arc<Participant>, answer: lk::SessionDescri
 
 async fn handle_add_track(participant: &Arc<Participant>, req: lk::AddTrackRequest) {
     if req.r#type != lk::TrackType::Audio as i32 {
-        // Voice-only server: reject non-audio publishes politely.
+        // Voice-only server: video is out of scope. Respond with a published
+        // track (without registering it) so the publisher's publish promise
+        // resolves instead of hanging; the media plane ignores non-audio RTP.
         tracing::warn!(sid = %participant.sid, cid = %req.cid, "rejecting non-audio track publish");
+        let track = Arc::new(PublishedTrack::new(
+            req.name,
+            req.cid.clone(),
+            TrackSource::from_proto(req.source),
+            req.stream,
+        ));
+        let resp = lk::SignalResponse {
+            message: Some(lk::signal_response::Message::TrackPublished(
+                lk::TrackPublishedResponse {
+                    cid: req.cid,
+                    track: Some(track.to_proto()),
+                },
+            )),
+        };
+        participant.send(resp).await;
         return;
     }
     if !participant.permission.lock().unwrap().can_publish {

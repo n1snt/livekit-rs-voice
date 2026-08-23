@@ -168,6 +168,7 @@ fn bench_audio_level(c: &mut Criterion) {
                 metrics: std::sync::Arc::new(lk_server::metrics::Metrics::default()),
                 track_source: "unknown".to_string(),
                 sender_report: std::sync::Mutex::new(None),
+                reported_loss: std::sync::Mutex::new((0, 0)),
                 forward_jitter: std::sync::Mutex::new(0.0),
                 last_forward_latency: std::sync::Mutex::new(None),
             });

@@ -204,6 +204,8 @@ pub struct Forwarder {
     /// Latest publisher SenderReport (rtp_time, NTP wall-clock in unix ns),
     /// used to derive per-packet forwarding latency.
     pub sender_report: Mutex<Option<(u32, i64)>>,
+    /// Cumulative lost/out-of-order counts already reported to the counters.
+    pub reported_loss: Mutex<(u64, u64)>,
     /// Running forwarding-jitter estimate (RFC 3550) over the latency series.
     pub forward_jitter: std::sync::Mutex<f64>,
     pub last_forward_latency: std::sync::Mutex<Option<f64>>,
@@ -342,6 +344,27 @@ impl Forwarder {
                 .with_label_values(labels)
                 .observe(jitter_us);
         }
+        // Cumulative counters: feed the delta since the last report.
+        let (lost, ooo) = {
+            let st = self.stats.lock().unwrap();
+            (st.lost, st.out_of_order)
+        };
+        let mut reported = self.reported_loss.lock().unwrap();
+        let d_loss = lost.saturating_sub(reported.0);
+        let d_ooo = ooo.saturating_sub(reported.1);
+        if d_loss > 0 {
+            self.metrics
+                .packet_loss_total
+                .with_label_values(labels)
+                .inc_by(d_loss);
+        }
+        if d_ooo > 0 {
+            self.metrics
+                .packet_out_of_order_total
+                .with_label_values(labels)
+                .inc_by(d_ooo);
+        }
+        *reported = (lost, ooo);
     }
 
     /// Updates the publisher SenderReport mapping used for forward latency.
@@ -796,6 +819,7 @@ pub async fn ensure_publisher(
                 metrics,
                 track_source: track.source.source_str().to_string(),
                 sender_report: Mutex::new(None),
+                reported_loss: Mutex::new((0, 0)),
                 forward_jitter: std::sync::Mutex::new(0.0),
                 last_forward_latency: std::sync::Mutex::new(None),
             });

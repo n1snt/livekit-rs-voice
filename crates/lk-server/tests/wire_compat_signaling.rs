@@ -133,7 +133,7 @@ async fn mute_broadcasts_to_participants() {
         other => panic!("expected TrackPublished, got {other:?}"),
     };
 
-    // Mute it.
+    // Mute it (client-initiated).
     send_request(
         &mut a,
         &lk::SignalRequest {
@@ -144,15 +144,19 @@ async fn mute_broadcasts_to_participants() {
         },
     )
     .await;
-    // The muting client receives a Mute ack.
-    let ack = await_message(&mut a, |r| {
-        matches!(r.message, Some(lk::signal_response::Message::Mute(_)))
-    })
+    // Reference parity: a client-initiated mute is NOT echoed back to the
+    // initiator (the server only acks from-admin mutes); the change is carried
+    // to others via the participant update below.
+    let ack = try_await_message(
+        &mut a,
+        |r| matches!(r.message, Some(lk::signal_response::Message::Mute(_))),
+        std::time::Duration::from_millis(300),
+    )
     .await;
-    match ack.message {
-        Some(lk::signal_response::Message::Mute(m)) => assert!(m.muted),
-        other => panic!("expected Mute ack, got {other:?}"),
-    }
+    assert!(
+        ack.is_none(),
+        "client-initiated mute must not be echoed to the initiator"
+    );
     drop(a);
 
     // The other participant observes the muted track in a participant update.

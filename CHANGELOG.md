@@ -48,6 +48,12 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 - Uploaded recordings are removed from local disk after a successful non-local upload.
 - Active speakers now expire when their audio-level packets stop (`reset_if_stale` was never invoked, so a speaker who stopped talking stayed listed).
 - The `room_total` metric counts only rooms this process actually created (a concurrent-join race no longer over-counts).
+- A client-initiated track mute is no longer echoed back to the muting client (reference `SetTrackMuted` only acks from-admin mutes); the change reaches others via the participant update.
+- Non-audio `AddTrack` requests are answered with a `TrackPublished` response (without registering the track) so a client publishing video does not hang awaiting publication.
+- Audio-level detection uses a std `Mutex` with `lock()` per packet instead of `blocking_lock()` on a `tokio::sync::Mutex`.
+- `ever_joined` / `empty_since` are driven only by non-dependent joins (an egress/agent joining no longer marks the room as ever-joined).
+- Deleted agent dispatches are removed from the registry and excluded from `list`/`get`, so a deleted dispatch can never be launched when its room is created.
+- `livekit_packet_loss_total` / `livekit_packet_out_of_order_total` are now fed from per-track loss/out-of-order deltas (previously registered but never incremented).
 
 ## [1.13.5.1] - 2026-08-22
 
