@@ -181,8 +181,11 @@ impl AgentManager {
     async fn dispatch_job(&self, job: lk::Job) -> Result<(), String> {
         let workers = self.workers_for(&job.agent_name);
         let Some(worker) = Self::pick_worker(&workers) else {
+            // Log the reference `livekit-server` message verbatim so the
+            // existing livekit-no-worker alert keeps matching.
+            tracing::warn!(agent = %job.agent_name, "not dispatching agent job since no worker is available");
             return Err(format!(
-                "no available worker for agent '{}'",
+                "not dispatching agent job since no worker is available (agent '{}')",
                 job.agent_name
             ));
         };

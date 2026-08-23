@@ -21,6 +21,16 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 - `livekit-voice` now sends the reference `egress_started` / `egress_updated` / `egress_ended` webhooks when the recorder reports egress state (`CreateEgress`/`UpdateEgress`), with `started`/`ended` deduped per egress id.
 - `livekit-egress` config accepts the Go `livekit/egress` keys so the same `egress.yaml` works unchanged: `s3` (default upload destination), `log_level` (top-level alias for `logging.level`), `insecure` and `cpu_cost` (parsed and logged as accepted-but-unused on the voice-only recorder, matching Go where they only affect web egress / job admission).
 
+### Changed
+
+- `livekit-voice` logs structured JSON (lowercase `level`, `ts`, `target`, `msg`, fields) matching the reference zap logs, so the promtail json stage extracts a `level` label and level-based filtering works.
+- Abnormal media-connection failures (peer connection `Failed`) log the reference `livekit-server` message `dtls timeout: read/write timeout: context deadline exceeded` at warn level, restoring the DTLS-timeout alert; graceful closes stay a debug line.
+- The no-worker agent condition now logs the reference `not dispatching agent job since no worker is available`, restoring the livekit-no-worker alert.
+
+### Fixed
+
+- The generic ERROR alert no longer fires spuriously on Rust error-level lines: the level is emitted lowercase (`"level":"error"`) like Go's zap, so uppercase `ERROR` never appears in server output.
+
 ## [1.13.5.1] - 2026-08-22
 
 ### Added

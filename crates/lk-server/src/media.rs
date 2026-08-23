@@ -594,7 +594,8 @@ pub async fn setup_subscriber(participant: &Arc<Participant>) -> Result<(), Stri
                 RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
             ) {
                 if let Some(p) = p.upgrade() {
-                    crate::signal::on_media_disconnected(&p).await;
+                    crate::signal::on_media_disconnected(&p, s == RTCPeerConnectionState::Failed)
+                        .await;
                 }
             }
         })
@@ -868,7 +869,7 @@ pub async fn ensure_publisher(
                 s,
                 RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
             ) {
-                crate::signal::on_media_disconnected(&p).await;
+                crate::signal::on_media_disconnected(&p, s == RTCPeerConnectionState::Failed).await;
             }
         })
     }));
