@@ -64,6 +64,21 @@ struct JobCtx {
     infos: Infos,
 }
 
+/// `cpu_cost` job-admission: reserves `room_composite_cpu_cost` per active
+/// recording against the node's CPU count (Go egress parity — the reference
+/// config sets 0.25 for audio-only so a 4-vCPU node admits ~16 recordings).
+fn admitted(conf: &EgressConfig, active_count: usize) -> bool {
+    let cost = conf
+        .cpu_cost
+        .as_ref()
+        .map(|c| c.room_composite_cpu_cost)
+        .unwrap_or(3.0);
+    let capacity = std::thread::available_parallelism()
+        .map(|n| n.get() as f64)
+        .unwrap_or(1.0);
+    ((active_count as f64) + 1.0) * cost <= capacity
+}
+
 struct Handlers {
     conf: EgressConfig,
     io: Arc<IoClient>,
@@ -437,6 +452,12 @@ impl IoHandler for Handlers {
                     return Err("room_name is required".to_string());
                 }
                 let request = request_info(&req).ok_or("unsupported egress request")?;
+                if !admitted(&self.conf, self.active.lock().unwrap().len()) {
+                    return Err(format!(
+                        "egress node at capacity ({} active, cpu_cost admission)",
+                        self.active.lock().unwrap().len()
+                    ));
+                }
 
                 let starting = lk::EgressInfo {
                     egress_id: egress_id.clone(),
@@ -580,6 +601,10 @@ async fn run_one(
     // Upload the finished file; `location` becomes FileInfo.location.
     let key = storage_key(&spec.filepath, egress_id, ext);
     let (location, _) = upload::upload(&local, &key, &spec.destination).await?;
+    // Uploaded recordings don't need to stay on local disk.
+    if !matches!(spec.destination, Destination::Local) {
+        let _ = std::fs::remove_file(&local);
+    }
     let info = recorder::finished_info(
         egress_id, &spec.room, &key, &location, request, frames, size,
     );
@@ -611,6 +636,35 @@ fn storage_key(filepath: &str, egress_id: &str, ext: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::load_config_from_yaml;
+
+    #[test]
+    fn cpu_cost_admission_bounds_concurrency() {
+        let capacity = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        // Configured 0.25 cost (the audio-only prod value): a 4-vCPU node
+        // admits ~16 concurrent recordings.
+        let conf = load_config_from_yaml(
+            r#"
+api_key: k
+api_secret: s
+ws_url: ws://x
+cpu_cost:
+  room_composite_cpu_cost: 0.25
+"#,
+        )
+        .unwrap();
+        assert!(admitted(&conf, 0));
+        assert!(admitted(&conf, capacity * 4 - 1));
+        assert!(!admitted(&conf, capacity * 4));
+
+        // Unconfigured cost falls back to the Go room-composite default (3.0),
+        // which caps small nodes well below any large active count.
+        let default = EgressConfig::default();
+        assert!(admitted(&default, 0));
+        assert!(!admitted(&default, capacity * 4));
+    }
 
     #[test]
     fn storage_key_defaults_and_appends_extension() {

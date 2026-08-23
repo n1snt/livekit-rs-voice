@@ -41,6 +41,13 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 - A participant whose media plane fails (`Failed`) is now torn down, so `participant_left` / `room_finished` fire instead of the participant lingering while the signal socket stays alive (reference parity).
 - The participant's `Active` transition is now broadcast as a `ParticipantUpdate`, so subscribers and an agent's `wait_for_participant` see the participant as active without waiting for media to publish.
 - The RTC config now wires `rtc.node_ip` / `rtc.use_external_ip` (NAT 1:1 host candidate) and `rtc.ips.includes` / `rtc.ips.excludes` (candidate IP filter) into the webrtc-rs setting engine, so browser-visible media uses the configured public addresses instead of auto-discovered interfaces. `rtc.udp_port` / `rtc.port_range_*` still cannot be honored (webrtc-rs 0.12 has no UDP port-range API).
+- Webhook delivery now retries with exponential backoff (1 + 5 attempts, 250 ms–4 s) instead of a single retry, so lifecycle events (`room_finished`, `egress_ended`) survive transient backend/network failures.
+- A room holding only dependent participants (egress/agent) is now treated as empty, matching the reference `CloseIfEmpty`: it closes after the departure timeout instead of leaking. The recorder's join token now carries `kind: egress` so it is classified as a dependent.
+- The recorder mixer drains on the largest track queue (a silent/DTX track can no longer stall the mix or grow other tracks' queues unboundedly) and prunes stale tracks (5 s) along with their decoders.
+- The recorder now enforces `cpu_cost` admission: each active recording reserves `room_composite_cpu_cost` against the node's CPU count (Go parity), rejecting jobs when at capacity.
+- Uploaded recordings are removed from local disk after a successful non-local upload.
+- Active speakers now expire when their audio-level packets stop (`reset_if_stale` was never invoked, so a speaker who stopped talking stayed listed).
+- The `room_total` metric counts only rooms this process actually created (a concurrent-join race no longer over-counts).
 
 ## [1.13.5.1] - 2026-08-22
 

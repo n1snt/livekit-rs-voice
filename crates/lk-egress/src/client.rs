@@ -50,6 +50,7 @@ fn join_token(
         "iat": now,
         "nbf": now - 5,
         "exp": now + 3600,
+        "kind": "egress",
         "video": {
             "roomJoin": true,
             "room": room,

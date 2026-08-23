@@ -305,13 +305,25 @@ impl Room {
     }
 
     /// Called when a participant leaves; tracks empty-since for timeout handling.
+    /// Dependent participants (egress/agent) do not keep the room alive: a room
+    /// holding only dependents is treated as empty (reference `CloseIfEmpty`).
     pub fn on_participant_left(&self) {
-        if self.participants.lock().unwrap().is_empty() {
+        if !self.has_non_dependent() {
             let mut es = self.empty_since.lock().unwrap();
             if es.is_none() {
                 *es = Some(unix_millis());
             }
         }
+    }
+
+    /// Whether any non-dependent (real) participant is in the room. Egress and
+    /// agent participants are dependents and do not keep a room open.
+    fn has_non_dependent(&self) -> bool {
+        self.participants
+            .lock()
+            .unwrap()
+            .values()
+            .any(|p| !p.kind.is_dependent())
     }
 
     /// Returns the number of ms the room has been empty, if any.
@@ -323,10 +335,12 @@ impl Room {
         *self.empty_since.lock().unwrap() = None;
     }
 
-    /// Whether the room should close: empty past departure timeout, or never
-    /// joined past empty timeout. Mirrors `CloseIfEmpty` semantics.
+    /// Whether the room should close: empty (no non-dependent participants) past
+    /// departure timeout, or never joined past empty timeout. Mirrors
+    /// `CloseIfEmpty` semantics (dependent egress/agent participants do not
+    /// keep the room open).
     pub fn should_close(&self) -> bool {
-        if self.closed.load(Ordering::Relaxed) || !self.participants.lock().unwrap().is_empty() {
+        if self.closed.load(Ordering::Relaxed) || self.has_non_dependent() {
             return false;
         }
         let timeout = if self.ever_joined.load(Ordering::Relaxed) {
@@ -520,6 +534,44 @@ mod tests {
         room.departure_timeout
             .store(1, std::sync::atomic::Ordering::Relaxed);
         room.ever_joined.store(true, Ordering::Relaxed);
+        *room.empty_since.lock().unwrap() = Some(unix_millis() - 2000);
+        assert!(room.should_close());
+    }
+
+    #[test]
+    fn should_close_ignores_dependent_participants() {
+        let room = Room::new(
+            "r".to_string(),
+            Arc::downgrade(&crate::room::test_context()),
+        );
+        room.empty_timeout
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        room.departure_timeout
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        room.ever_joined.store(true, Ordering::Relaxed);
+
+        // A real participant keeps the room open.
+        let caller = Participant::new(
+            "c".to_string(),
+            String::new(),
+            String::new(),
+            ParticipantKind::Standard,
+        );
+        room.join(caller.clone());
+        assert!(!room.should_close());
+
+        // Caller leaves; only a dependent egress remains → treated as empty and
+        // closed after the departure timeout (reference CloseIfEmpty parity).
+        room.remove_participant(&caller.sid);
+        room.on_participant_left();
+        assert!(room.empty_since_ms().is_some());
+        let egress = Participant::new(
+            "eg-1".to_string(),
+            String::new(),
+            String::new(),
+            ParticipantKind::Egress,
+        );
+        room.join(egress);
         *room.empty_since.lock().unwrap() = Some(unix_millis() - 2000);
         assert!(room.should_close());
     }

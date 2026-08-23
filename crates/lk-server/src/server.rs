@@ -90,7 +90,6 @@ impl Server {
                 s.on_room_closed(&weak_room);
             }
         });
-        self.context.metrics.room_total.inc();
         let created_room = {
             let mut rooms = self.rooms.lock().unwrap();
             let existing = rooms
@@ -102,6 +101,7 @@ impl Server {
             // This call created the room: launch any agent dispatches that were
             // created for it before the room existed (outbound calls create the
             // dispatch before the SIP participant joins the room).
+            self.context.metrics.room_total.inc();
             let this = self.clone();
             let spawned_room = created_room.clone();
             tokio::spawn(async move {

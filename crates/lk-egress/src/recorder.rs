@@ -23,25 +23,50 @@ pub enum OutputFormat {
 /// Per-track PCM buffers that are drained into mixed frames of fixed length.
 struct Mixer {
     tracks: HashMap<String, VecDeque<i16>>,
+    last_packet: HashMap<String, std::time::Instant>,
 }
+
+/// A track with no packets for this long is considered gone and is pruned
+/// (DTX silence, a participant that stopped, etc.).
+const SILENT_TRACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Mixer {
     fn new() -> Self {
         Mixer {
             tracks: HashMap::new(),
+            last_packet: HashMap::new(),
         }
     }
 
     fn push(&mut self, cid: &str, pcm: Vec<i16>) {
         self.tracks.entry(cid.to_string()).or_default().extend(pcm);
+        self.last_packet
+            .insert(cid.to_string(), std::time::Instant::now());
     }
 
-    /// Number of samples available in every track (the mixable minimum).
-    fn available(&self) -> usize {
-        if self.tracks.is_empty() {
-            return 0;
+    /// Drops tracks that have not produced a packet for `SILENT_TRACK_TIMEOUT`
+    /// (a stalled/DTX track must not keep other tracks' queues growing
+    /// unboundedly). Returns the pruned track ids so decoders can be dropped.
+    fn prune_stale(&mut self) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let stale: Vec<String> = self
+            .last_packet
+            .iter()
+            .filter(|(_, t)| now.duration_since(**t) > SILENT_TRACK_TIMEOUT)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for cid in &stale {
+            self.tracks.remove(cid);
+            self.last_packet.remove(cid);
         }
-        self.tracks.values().map(|q| q.len()).min().unwrap_or(0)
+        stale
+    }
+
+    /// Samples available to mix: the largest queue, so any track with a full
+    /// frame triggers a drain. Tracks with fewer samples are padded with
+    /// silence, which a silent/DTX track can no longer prevent.
+    fn available(&self) -> usize {
+        self.tracks.values().map(|q| q.len()).max().unwrap_or(0)
     }
 
     /// Reads `len` samples from each track and mixes them (missing samples are
@@ -100,6 +125,11 @@ pub async fn run_recording(
                 tracing::debug!(len = packet.payload.len(), "opus decode failed: {e}");
                 continue;
             }
+        }
+        // Prune tracks that stopped sending (DTX/pause) so a silent track can
+        // neither stall the mix nor leak decoder/queue memory.
+        for cid in mixer.prune_stale() {
+            decoders.remove(&cid);
         }
         // Drain fixed-size frames; mix whatever is available in all tracks.
         while mixer.available() >= FRAME_SAMPLES {
@@ -186,7 +216,8 @@ mod tests {
         let mut m = Mixer::new();
         m.push("t1", vec![100i16, 200]);
         m.push("t2", vec![50i16, 100, 300]);
-        assert_eq!(m.available(), 2);
+        // available() is the largest queue: any track with a full frame drains.
+        assert_eq!(m.available(), 3);
         let f = m.read_frame(2);
         assert_eq!(f, vec![75, 150]);
     }
@@ -197,5 +228,27 @@ mod tests {
         m.push("t1", vec![100i16]);
         let f = m.read_frame(2);
         assert_eq!(f, vec![100, 0]); // second sample fills with silence
+    }
+
+    #[tokio::test]
+    async fn silent_track_does_not_block_mix_and_is_pruned() {
+        let mut m = Mixer::new();
+        m.push("t1", vec![100i16, 200]);
+        m.push("t2", vec![50i16]);
+        // t2 has fewer samples: draining is driven by t1's larger queue.
+        assert_eq!(m.available(), 2);
+        let f = m.read_frame(2);
+        // t1 contributes 100,200; t2 contributes 50 then silence.
+        assert_eq!(f, vec![75, 100]);
+
+        // A track that stops sending is pruned after the silence timeout.
+        m.last_packet.insert(
+            "t2".to_string(),
+            std::time::Instant::now() - SILENT_TRACK_TIMEOUT - std::time::Duration::from_secs(1),
+        );
+        let pruned = m.prune_stale();
+        assert_eq!(pruned, vec!["t2".to_string()]);
+        assert_eq!(m.tracks.len(), 1);
+        assert!(!m.tracks.contains_key("t2"));
     }
 }

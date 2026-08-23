@@ -68,7 +68,11 @@ impl WebhookNotifier {
         out
     }
 
-    /// Sends a webhook event asynchronously (fire-and-forget with one retry).
+    /// Sends a webhook event asynchronously with bounded retries and
+    /// exponential backoff. Lifecycle events (room_finished, egress_ended)
+    /// drive billing/DID release, so a single lost delivery is costly; the
+    /// reference keeps a durable queue, but in-process retries cover transient
+    /// backend/network failures.
     pub async fn send_event(&self, event: lk::WebhookEvent) {
         let Some(inner) = self.inner.clone() else {
             return;
@@ -85,12 +89,17 @@ impl WebhookNotifier {
             let body = body.clone();
             tokio::spawn(async move {
                 let headers = [("X-Livekit-Signature", sig.as_str())];
-                match Self::post_once(&client, &url, &headers, &body).await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        // single retry after a short delay
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        let _ = Self::post_once(&client, &url, &headers, &body).await;
+                // 1 initial attempt + 5 retries with backoff (250ms..4s).
+                let delays = [250u64, 500, 1000, 2000, 4000];
+                for (i, delay_ms) in delays.iter().enumerate() {
+                    if Self::post_once(&client, &url, &headers, &body)
+                        .await
+                        .is_ok()
+                    {
+                        return;
+                    }
+                    if i + 1 < delays.len() {
+                        tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
                     }
                 }
             });

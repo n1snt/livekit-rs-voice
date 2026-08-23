@@ -1273,6 +1273,9 @@ pub fn active_speakers(participants: &[Arc<Participant>]) -> Vec<lk::SpeakerInfo
                 .collect::<Vec<_>>()
         };
         for f in forwarders {
+            // Expire speakers whose packets stopped (DTX/pause) so they are not
+            // reported active forever.
+            f.audio.reset_if_stale();
             if f.audio.is_active() {
                 speakers.push(lk::SpeakerInfo {
                     sid: p.sid.clone(),
