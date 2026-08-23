@@ -13,6 +13,14 @@ The fourth component, `R`, is our own build/patch revision for changes that do n
 
 The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision. See [docs/versioning.md](docs/versioning.md) for the full policy.
 
+## [Unreleased]
+
+### Added
+
+- `livekit-egress` can now upload finished recordings to S3-compatible object storage (AWS S3, Cloudflare R2, MinIO) via the new `s3:` config block or per-request `EncodedFileOutput.s3`/`StorageConfig` upload config. `FileInfo.filename` is the storage key and `FileInfo.location` the object URL, matching the reference `livekit/egress`. GCP/Azure/AliOSS uploads return a clear "not supported" error instead of being ignored.
+- `livekit-voice` now sends the reference `egress_started` / `egress_updated` / `egress_ended` webhooks when the recorder reports egress state (`CreateEgress`/`UpdateEgress`), with `started`/`ended` deduped per egress id.
+- `livekit-egress` config accepts the Go `livekit/egress` keys so the same `egress.yaml` works unchanged: `s3` (default upload destination), `log_level` (top-level alias for `logging.level`), `insecure` and `cpu_cost` (parsed and logged as accepted-but-unused on the voice-only recorder, matching Go where they only affect web egress / job admission).
+
 ## [1.13.5.1] - 2026-08-22
 
 ### Added

@@ -217,6 +217,53 @@ impl WebhookNotifier {
         })
         .await;
     }
+
+    /// A minimal `Room` carrying the egress's room id/name, mirroring the
+    /// reference server's `egress_started`/`egress_updated`/`egress_ended`
+    /// payloads (room id + name + full `EgressInfo`).
+    fn egress_room(info: &lk::EgressInfo) -> lk::Room {
+        lk::Room {
+            sid: info.room_id.clone(),
+            name: info.room_name.clone(),
+            ..Default::default()
+        }
+    }
+
+    pub async fn egress_started(&self, info: &lk::EgressInfo) {
+        self.send_event(lk::WebhookEvent {
+            event: "egress_started".to_string(),
+            room: Some(Self::egress_room(info)),
+            egress_info: Some(info.clone()),
+            created_at: crate::core::unix_seconds(),
+            id: crate::core::generate_id("EV_"),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    pub async fn egress_updated(&self, info: &lk::EgressInfo) {
+        self.send_event(lk::WebhookEvent {
+            event: "egress_updated".to_string(),
+            room: Some(Self::egress_room(info)),
+            egress_info: Some(info.clone()),
+            created_at: crate::core::unix_seconds(),
+            id: crate::core::generate_id("EV_"),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    pub async fn egress_ended(&self, info: &lk::EgressInfo) {
+        self.send_event(lk::WebhookEvent {
+            event: "egress_ended".to_string(),
+            room: Some(Self::egress_room(info)),
+            egress_info: Some(info.clone()),
+            created_at: crate::core::unix_seconds(),
+            id: crate::core::generate_id("EV_"),
+            ..Default::default()
+        })
+        .await;
+    }
 }
 
 #[cfg(test)]

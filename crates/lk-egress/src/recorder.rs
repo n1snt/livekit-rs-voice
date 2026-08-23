@@ -143,22 +143,24 @@ fn append_bytes(path: &str, bytes: &[u8]) -> Result<(), String> {
 
 /// Builds an `EgressInfo` reflecting a finished recording. Populates both the
 /// non-deprecated `file_results` and the legacy `result` oneof (clients read
-/// `file_results`, matching the reference).
+/// `file_results`, matching the reference). `filename` is the storage key and
+/// `location` the uploaded URL (or local path when not uploaded).
 pub fn finished_info(
     egress_id: &str,
     room_name: &str,
-    path: &str,
+    filename: &str,
+    location: &str,
     request: lk::egress_info::Request,
     frames: u64,
     size: u64,
 ) -> lk::EgressInfo {
     let now = crate::now_secs();
     let file = lk::FileInfo {
-        filename: path.to_string(),
+        filename: filename.to_string(),
         started_at: now,
         ended_at: now,
         duration: (frames * 20) as i64,
-        location: String::new(),
+        location: location.to_string(),
         size: size as i64,
     };
     lk::EgressInfo {

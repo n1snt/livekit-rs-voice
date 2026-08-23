@@ -1,6 +1,6 @@
 //! Server-level room management and background workers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -178,6 +178,9 @@ impl Server {
         let egress_handlers: Arc<dyn crate::psrpc::IoHandler> =
             Arc::new(crate::ioservice::EgressIoHandlers {
                 store: self.store.clone(),
+                webhook: self.context.webhook.clone(),
+                started: Arc::new(Mutex::new(HashSet::new())),
+                ended: Arc::new(Mutex::new(HashSet::new())),
             });
         for method in ["CreateEgress", "UpdateEgress"] {
             io_info.register(method, egress_handlers.clone()).await?;

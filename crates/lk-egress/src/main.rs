@@ -64,12 +64,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (config_path, config_body, dev) = parse_args();
     let config = load_config(config_path, config_body, dev)?;
 
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.logging.level));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(config.effective_log_level()));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
+
+    // Go egress keys with no voice-only-recorder equivalent: accepted, unused.
+    if config.insecure {
+        tracing::warn!(
+            "insecure=true accepted but unused (it only affects the Go egress's web/Chrome path)"
+        );
+    }
+    if let Some(cpu) = &config.cpu_cost {
+        tracing::info!(
+            room_composite_cpu_cost = cpu.room_composite_cpu_cost,
+            "cpu_cost accepted but unused (voice-only recorder has no job-admission gating)"
+        );
+    }
 
     if config.redis.address.is_empty() {
         return Err("redis is required (psrpc bus to the livekit-voice server)".into());

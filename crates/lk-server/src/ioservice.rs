@@ -10,8 +10,9 @@
 // (`from`/`to`/`calling_number`/...), so they are part of the wire contract.
 #![allow(deprecated)]
 
+use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use lk_proto::livekit as lk;
 use lk_proto::livekit::sip_dispatch_rule::Rule as DispatchRule;
@@ -37,9 +38,14 @@ pub struct SipIoHandlers {
 }
 
 /// Handlers for the `IOInfo` egress methods (`CreateEgress`, `UpdateEgress`),
-/// which the `livekit-egress` recorder calls to report state back.
+/// which the `livekit-egress` recorder calls to report state back. Fires the
+/// reference `egress_started` / `egress_updated` / `egress_ended` webhooks
+/// (`started`/`ended` deduped per egress id).
 pub struct EgressIoHandlers {
     pub store: Arc<Store>,
+    pub webhook: crate::webhook::WebhookNotifier,
+    pub started: Arc<Mutex<HashSet<String>>>,
+    pub ended: Arc<Mutex<HashSet<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -49,6 +55,29 @@ impl IoHandler for EgressIoHandlers {
             "CreateEgress" | "UpdateEgress" => {
                 let info = lk::EgressInfo::decode(raw.as_slice()).map_err(|e| e.to_string())?;
                 self.store.store_egress(&info).await?;
+                match method {
+                    "CreateEgress" => {
+                        if self.started.lock().unwrap().insert(info.egress_id.clone()) {
+                            self.webhook.egress_started(&info).await;
+                        }
+                    }
+                    _ => {
+                        let terminal = matches!(
+                            lk::EgressStatus::try_from(info.status),
+                            Ok(lk::EgressStatus::EgressComplete
+                                | lk::EgressStatus::EgressFailed
+                                | lk::EgressStatus::EgressAborted
+                                | lk::EgressStatus::EgressLimitReached)
+                        );
+                        if terminal {
+                            if self.ended.lock().unwrap().insert(info.egress_id.clone()) {
+                                self.webhook.egress_ended(&info).await;
+                            }
+                        } else {
+                            self.webhook.egress_updated(&info).await;
+                        }
+                    }
+                }
                 Ok(lk_proto::well_known::Empty {}.encode_to_vec())
             }
             _ => Err(format!("unknown IOInfo method: {method}")),

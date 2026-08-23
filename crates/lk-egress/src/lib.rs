@@ -7,6 +7,7 @@ pub mod io;
 pub mod mp3;
 pub mod recorder;
 pub mod server;
+pub mod upload;
 pub mod wav;
 
 pub fn now_secs() -> i64 {
