@@ -134,10 +134,17 @@ async fn put_s3(s3: &S3Target, key: &str, bytes: Vec<u8>) -> Result<String, Stri
         builder = builder.with_token(&session_token);
     }
     if !s3.endpoint.is_empty() {
-        builder = builder.with_endpoint(&s3.endpoint).with_allow_http(true);
-    }
-    if s3.force_path_style {
-        builder = builder.with_virtual_hosted_style_request(false);
+        // Custom endpoints (R2, MinIO) are account-scoped hosts, not
+        // bucket-scoped subdomains: object_store must use path-style here, so
+        // the object lands at {endpoint}/{bucket}/{key} regardless of
+        // force_path_style (object_url reports the same shape).
+        builder = builder
+            .with_endpoint(&s3.endpoint)
+            .with_allow_http(true)
+            .with_virtual_hosted_style_request(false);
+    } else {
+        // Real AWS: virtual-hosted by default, path-style when requested.
+        builder = builder.with_virtual_hosted_style_request(!s3.force_path_style);
     }
     let store = builder.build().map_err(|e| format!("s3 config: {e}"))?;
     let path = Path::from(key);
@@ -260,12 +267,9 @@ fn parse_tagging(tagging: &str) -> HashMap<String, String> {
 /// Builds the `FileInfo.location` URL for an S3-compatible upload.
 fn object_url(s3: &S3Target, key: &str) -> String {
     if !s3.endpoint.is_empty() {
-        let base = s3.endpoint.trim_end_matches('/');
-        if s3.force_path_style {
-            format!("{base}/{}/{key}", s3.bucket)
-        } else {
-            format!("{base}/{key}")
-        }
+        format!("{}/{}/{key}", s3.endpoint.trim_end_matches('/'), s3.bucket)
+    } else if s3.force_path_style {
+        format!("https://s3.{}.amazonaws.com/{}/{key}", s3.region, s3.bucket)
     } else {
         format!("https://{}.s3.{}.amazonaws.com/{key}", s3.bucket, s3.region)
     }
@@ -298,9 +302,11 @@ mod tests {
             assume_role_arn: String::new(),
             assume_role_external_id: String::new(),
         };
+        // Custom endpoints are always path-style: the bucket must appear in the
+        // reported URL, exactly where object_store PUT the object.
         assert_eq!(
             object_url(&s3, "EG_1.wav"),
-            "https://example.r2.cloudflarestorage.com/EG_1.wav"
+            "https://example.r2.cloudflarestorage.com/voice-ai-recordings/EG_1.wav"
         );
         let mut path_style = s3.clone();
         path_style.force_path_style = true;
@@ -329,6 +335,12 @@ mod tests {
         assert_eq!(
             object_url(&s3, "EG_1.mp3"),
             "https://voice-ai-recordings.s3.ap-south-1.amazonaws.com/EG_1.mp3"
+        );
+        let mut path_style = s3;
+        path_style.force_path_style = true;
+        assert_eq!(
+            object_url(&path_style, "EG_1.mp3"),
+            "https://s3.ap-south-1.amazonaws.com/voice-ai-recordings/EG_1.mp3"
         );
     }
 

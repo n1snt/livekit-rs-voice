@@ -34,6 +34,8 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 ### Fixed
 
 - The generic ERROR alert no longer fires spuriously on Rust error-level lines: the level is emitted lowercase (`"level":"error"`) like Go's zap, so uppercase `ERROR` never appears in server output.
+- S3 `FileInfo.location` now matches where the object is actually stored. Custom endpoints (R2, MinIO) always report `{endpoint}/{bucket}/{key}` because `object_store` uploads path-style there regardless of `force_path_style`; real AWS reports virtual-hosted or path-style consistently with the PUT. Previously the URL omitted the bucket for custom endpoints, so a client signing a GET against it hit a non-existent bucket and playback broke.
+- Failed recordings now report `EGRESS_FAILED` to the server (with the error message), so the `egress_ended` webhook fires and the stored `EgressInfo` is terminal instead of a stale STARTING/ACTIVE state a sweeper could adopt.
 
 ## [1.13.5.1] - 2026-08-22
 

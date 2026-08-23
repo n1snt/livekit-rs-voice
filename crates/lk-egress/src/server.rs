@@ -484,6 +484,29 @@ impl IoHandler for Handlers {
                 tokio::spawn(async move {
                     if let Err(e) = run_one(&conf, &ctx, &egress_id, &spec, stop_rx).await {
                         tracing::warn!(egress_id, "recording failed: {e}");
+                        // Report EGRESS_FAILED so the server fires the terminal
+                        // `egress_ended` webhook (Go egress parity) and the
+                        // stored info is not left in a stale STARTING/ACTIVE
+                        // state that a sweeper could adopt.
+                        let failed = lk::EgressInfo {
+                            egress_id: egress_id.clone(),
+                            room_name: spec.room.clone(),
+                            status: lk::EgressStatus::EgressFailed as i32,
+                            started_at: crate::now_secs(),
+                            ended_at: crate::now_secs(),
+                            updated_at: crate::now_secs(),
+                            error: e,
+                            request: Some(lk::egress_info::Request::RoomComposite(
+                                lk::RoomCompositeEgressRequest {
+                                    room_name: spec.room.clone(),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        };
+                        let _ = ctx.io.update_egress(&failed).await;
+                        ctx.infos.lock().unwrap().insert(egress_id.clone(), failed);
+                        ctx.active.lock().unwrap().remove(&egress_id);
                     }
                     if let Some(task) = stop_tasks.lock().unwrap().remove(&egress_id) {
                         task.abort();
