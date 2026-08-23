@@ -179,7 +179,6 @@ impl Server {
             Arc::new(crate::ioservice::EgressIoHandlers {
                 store: self.store.clone(),
                 webhook: self.context.webhook.clone(),
-                started: Arc::new(Mutex::new(HashSet::new())),
                 ended: Arc::new(Mutex::new(HashSet::new())),
             });
         for method in ["CreateEgress", "UpdateEgress"] {

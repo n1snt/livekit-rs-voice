@@ -39,12 +39,13 @@ pub struct SipIoHandlers {
 
 /// Handlers for the `IOInfo` egress methods (`CreateEgress`, `UpdateEgress`),
 /// which the `livekit-egress` recorder calls to report state back. Fires the
-/// reference `egress_started` / `egress_updated` / `egress_ended` webhooks
-/// (`started`/`ended` deduped per egress id).
+/// reference `egress_started` / `egress_updated` / `egress_ended` webhooks.
+/// `egress_started` is deduped against the durable store so an SFU restart
+/// cannot re-fire it for a retried `CreateEgress`; `egress_ended` is deduped
+/// per process.
 pub struct EgressIoHandlers {
     pub store: Arc<Store>,
     pub webhook: crate::webhook::WebhookNotifier,
-    pub started: Arc<Mutex<HashSet<String>>>,
     pub ended: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -54,14 +55,19 @@ impl IoHandler for EgressIoHandlers {
         match method {
             "CreateEgress" | "UpdateEgress" => {
                 let info = lk::EgressInfo::decode(raw.as_slice()).map_err(|e| e.to_string())?;
-                self.store.store_egress(&info).await?;
                 match method {
                     "CreateEgress" => {
-                        if self.started.lock().unwrap().insert(info.egress_id.clone()) {
-                            self.webhook.egress_started(&info).await;
+                        // Reference parity: if the egress already exists in the
+                        // store, this is a retried create — do not re-store or
+                        // re-fire `egress_started`.
+                        if let Ok(Some(_)) = self.store.load_egress(&info.egress_id).await {
+                            return Ok(lk_proto::well_known::Empty {}.encode_to_vec());
                         }
+                        self.store.store_egress(&info).await?;
+                        self.webhook.egress_started(&info).await;
                     }
                     _ => {
+                        self.store.store_egress(&info).await?;
                         let terminal = matches!(
                             lk::EgressStatus::try_from(info.status),
                             Ok(lk::EgressStatus::EgressComplete
