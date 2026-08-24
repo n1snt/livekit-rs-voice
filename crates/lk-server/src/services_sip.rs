@@ -768,6 +768,7 @@ pub async fn egress_service(
             out(&info, format)
         }
         "ListEgress" => {
+            ensure_record(req)?;
             let r: lk::ListEgressRequest = parse_body(body, format)?;
             let all = store.list_egress().await.map_err(twirp_internal)?;
             let items: Vec<lk::EgressInfo> = all
@@ -781,6 +782,15 @@ pub async fn egress_service(
                     }
                     true
                 })
+                .filter(|e| {
+                    if !r.active {
+                        return true;
+                    }
+                    matches!(
+                        lk::EgressStatus::try_from(e.status),
+                        Ok(lk::EgressStatus::EgressStarting | lk::EgressStatus::EgressActive)
+                    )
+                })
                 .collect();
             out(
                 &lk::ListEgressResponse {
@@ -791,9 +801,30 @@ pub async fn egress_service(
             )
         }
         "StopEgress" => {
+            ensure_record(req)?;
             let r: lk::StopEgressRequest = parse_body(body, format)?;
             if r.egress_id.is_empty() {
                 return Err(TwirpError::invalid_argument("egress_id is required"));
+            }
+            // Reference parity: distinguish "never existed" from "already
+            // terminal" from the store before waiting on a psrpc selection
+            // timeout, so a stray StopEgress fails fast with the same error
+            // the reference server returns.
+            let stored = store.load_egress(&r.egress_id).await.map_err(twirp_internal)?;
+            if let Some(info) = &stored {
+                if !matches!(
+                    lk::EgressStatus::try_from(info.status),
+                    Ok(lk::EgressStatus::EgressStarting | lk::EgressStatus::EgressActive)
+                ) {
+                    let status = lk::EgressStatus::try_from(info.status)
+                        .map(|s| format!("{s:?}"))
+                        .unwrap_or_else(|_| info.status.to_string());
+                    return Err(TwirpError::failed_precondition(format!(
+                        "egress with status {status} cannot be stopped"
+                    )));
+                }
+            } else {
+                return Err(TwirpError::not_found("egress does not exist"));
             }
             let client = server
                 .egress_client()
@@ -821,8 +852,16 @@ async fn start_egress(
     request: lk_proto::rpc::start_egress_request::Request,
 ) -> Result<lk::EgressInfo, TwirpError> {
     let egress_id = crate::core::generate_id("EG_");
+    // Resolve the room id when the room exists (the reference
+    // `egressLauncher.StartEgress` loads the room and stamps `RoomId` onto the
+    // request, which the recorder echoes back in `EgressInfo.room_id`).
+    let room_id = server
+        .get_room(room_name)
+        .map(|r| r.sid.clone())
+        .unwrap_or_default();
     let ireq = lk_proto::rpc::StartEgressRequest {
         egress_id: egress_id.clone(),
+        room_id: room_id.clone(),
         room_name: room_name.to_string(),
         request: Some(request),
         ..Default::default()

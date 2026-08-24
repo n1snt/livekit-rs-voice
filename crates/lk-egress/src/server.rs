@@ -397,11 +397,31 @@ fn request_info(req: &rpc::StartEgressRequest) -> Option<lk::egress_info::Reques
     use lk::egress_info::Request;
     use rpc::start_egress_request::Request as SR;
     match &req.request {
-        Some(SR::RoomComposite(r)) => Some(Request::RoomComposite(r.clone())),
-        Some(SR::Track(r)) => Some(Request::Track(r.clone())),
-        Some(SR::Participant(r)) => Some(Request::Participant(r.clone())),
-        Some(SR::TrackComposite(r)) => Some(Request::TrackComposite(r.clone())),
-        Some(SR::Egress(r)) => Some(Request::Egress(r.clone())),
+        Some(SR::RoomComposite(r)) => {
+            let mut r = r.clone();
+            crate::redact::redact_room_composite(&mut r);
+            Some(Request::RoomComposite(r))
+        }
+        Some(SR::Track(r)) => {
+            let mut r = r.clone();
+            crate::redact::redact_direct(&mut r);
+            Some(Request::Track(r))
+        }
+        Some(SR::Participant(r)) => {
+            let mut r = r.clone();
+            crate::redact::redact_encoded(&mut r);
+            Some(Request::Participant(r))
+        }
+        Some(SR::TrackComposite(r)) => {
+            let mut r = r.clone();
+            crate::redact::redact_encoded(&mut r);
+            Some(Request::TrackComposite(r))
+        }
+        Some(SR::Egress(r)) => {
+            let mut r = r.clone();
+            crate::redact::redact_start(&mut r);
+            Some(Request::Egress(r))
+        }
         _ => None,
     }
 }
@@ -459,13 +479,18 @@ impl IoHandler for Handlers {
                     ));
                 }
 
+                let now = crate::now_nanos();
                 let starting = lk::EgressInfo {
                     egress_id: egress_id.clone(),
+                    room_id: req.room_id.clone(),
                     room_name: room.clone(),
                     status: lk::EgressStatus::EgressStarting as i32,
-                    started_at: crate::now_secs(),
-                    updated_at: crate::now_secs(),
-                    request: Some(request),
+                    started_at: now,
+                    updated_at: now,
+                    request: Some(request.clone()),
+                    // The Go egress reports EGRESS_SOURCE_TYPE_SDK for the SDK
+                    // (room-composite-audio/track/participant/media) sources.
+                    source_type: lk::EgressSourceType::Sdk as i32,
                     ..Default::default()
                 };
                 let _ = self.io.create_egress(&starting).await;
@@ -502,27 +527,37 @@ impl IoHandler for Handlers {
                     infos: self.infos.clone(),
                 };
                 let stop_tasks = self.stop_tasks.clone();
+                let request = request.clone();
+                let room_id = req.room_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_one(&conf, &ctx, &egress_id, &spec, stop_rx).await {
+                    if let Err(e) = run_one(
+                        &conf,
+                        &ctx,
+                        &egress_id,
+                        &room_id,
+                        &spec,
+                        request.clone(),
+                        stop_rx,
+                    )
+                    .await
+                    {
                         tracing::warn!(egress_id, "recording failed: {e}");
                         // Report EGRESS_FAILED so the server fires the terminal
                         // `egress_ended` webhook (Go egress parity) and the
                         // stored info is not left in a stale STARTING/ACTIVE
                         // state that a sweeper could adopt.
+                        let now = crate::now_nanos();
                         let failed = lk::EgressInfo {
                             egress_id: egress_id.clone(),
+                            room_id: room_id.clone(),
                             room_name: spec.room.clone(),
                             status: lk::EgressStatus::EgressFailed as i32,
-                            started_at: crate::now_secs(),
-                            ended_at: crate::now_secs(),
-                            updated_at: crate::now_secs(),
+                            started_at: now,
+                            ended_at: now,
+                            updated_at: now,
                             error: e,
-                            request: Some(lk::egress_info::Request::RoomComposite(
-                                lk::RoomCompositeEgressRequest {
-                                    room_name: spec.room.clone(),
-                                    ..Default::default()
-                                },
-                            )),
+                            request: Some(request.clone()),
+                            source_type: lk::EgressSourceType::Sdk as i32,
                             ..Default::default()
                         };
                         let _ = ctx.io.update_egress(&failed).await;
@@ -550,7 +585,9 @@ async fn run_one(
     conf: &EgressConfig,
     ctx: &JobCtx,
     egress_id: &str,
+    room_id: &str,
     spec: &RecSpec,
+    request: lk::egress_info::Request,
     stop_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let ext = if spec.format == OutputFormat::Mp3 {
@@ -576,17 +613,16 @@ async fn run_one(
     tracing::info!(egress_id, room = %spec.room, "connected; recording");
 
     // Report ACTIVE so the server fires the reference `egress_updated` webhook.
-    let request = lk::egress_info::Request::RoomComposite(lk::RoomCompositeEgressRequest {
-        room_name: spec.room.clone(),
-        ..Default::default()
-    });
+    let now = crate::now_nanos();
     let active = lk::EgressInfo {
         egress_id: egress_id.to_string(),
+        room_id: room_id.to_string(),
         room_name: spec.room.clone(),
         status: lk::EgressStatus::EgressActive as i32,
-        started_at: crate::now_secs(),
-        updated_at: crate::now_secs(),
+        started_at: now,
+        updated_at: now,
         request: Some(request.clone()),
+        source_type: lk::EgressSourceType::Sdk as i32,
         ..Default::default()
     };
     let _ = ctx.io.update_egress(&active).await;
@@ -606,7 +642,7 @@ async fn run_one(
         let _ = std::fs::remove_file(&local);
     }
     let info = recorder::finished_info(
-        egress_id, &spec.room, &key, &location, request, frames, size,
+        egress_id, room_id, &spec.room, &key, &location, request, frames, size,
     );
     let _ = ctx.io.update_egress(&info).await;
     ctx.infos

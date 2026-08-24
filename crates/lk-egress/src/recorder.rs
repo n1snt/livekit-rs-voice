@@ -177,6 +177,7 @@ fn append_bytes(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// `location` the uploaded URL (or local path when not uploaded).
 pub fn finished_info(
     egress_id: &str,
+    room_id: &str,
     room_name: &str,
     filename: &str,
     location: &str,
@@ -184,7 +185,7 @@ pub fn finished_info(
     frames: u64,
     size: u64,
 ) -> lk::EgressInfo {
-    let now = crate::now_secs();
+    let now = crate::now_nanos();
     let file = lk::FileInfo {
         filename: filename.to_string(),
         started_at: now,
@@ -195,6 +196,7 @@ pub fn finished_info(
     };
     lk::EgressInfo {
         egress_id: egress_id.to_string(),
+        room_id: room_id.to_string(),
         room_name: room_name.to_string(),
         status: lk::EgressStatus::EgressComplete as i32,
         started_at: now,
@@ -203,6 +205,7 @@ pub fn finished_info(
         request: Some(request),
         result: Some(lk::egress_info::Result::File(file.clone())),
         file_results: vec![file],
+        source_type: lk::EgressSourceType::Sdk as i32,
         ..Default::default()
     }
 }

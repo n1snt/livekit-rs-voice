@@ -497,6 +497,10 @@ impl PsrpcClient {
             .map_err(PsrpcError::Bus)?;
 
         let rclaim_channel = claim_response_channel(&self.service, method, topic);
+        // Only one server may be granted the request. The reference client
+        // picks the highest-affinity bidder and ignores further claims (else
+        // every egress node that bids would start the same recording).
+        let mut granted = false;
         loop {
             tokio::select! {
                 biased;
@@ -509,6 +513,9 @@ impl PsrpcClient {
                 claim = claim_rx.recv() => {
                     match claim {
                         Some(claim) => {
+                            if granted {
+                                continue;
+                            }
                             let grant = internal::ClaimResponse {
                                 request_id: claim.request_id,
                                 server_id: claim.server_id,
@@ -517,6 +524,7 @@ impl PsrpcClient {
                                 .publish(&rclaim_channel, envelope("internal.ClaimResponse", &grant))
                                 .await
                                 .map_err(PsrpcError::Bus)?;
+                            granted = true;
                         }
                         None => return Err(PsrpcError::ChannelClosed),
                     }
