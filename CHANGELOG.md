@@ -55,6 +55,7 @@ The wire `server_version` advertised in `JoinResponse` stays the protocol level 
 - Deleted agent dispatches are removed from the registry and excluded from `list`/`get`, so a deleted dispatch can never be launched when its room is created.
 - `livekit_packet_loss_total` / `livekit_packet_out_of_order_total` are now fed from per-track loss/out-of-order deltas (previously registered but never incremented).
 - Publisher/subscriber peer-connection creation is serialized per participant (a dedicated `pc_create` lock, distinct from negotiation), so two concurrent calls can no longer both pass the check-then-create and leak a PC.
+- Documented the RTC media-port limitation: `rtc.udp_port` / `rtc.tcp_port` / `rtc.port_range_*` are accepted for Go-config compatibility but not enforced (webrtc-rs 0.12 has no UDP port-range API), so the SFU binds ephemeral UDP ports and firewall rules for a fixed media range do not apply (readme "Differences from LiveKit" + `config.rs` doc comments).
 
 ## [1.13.5.1] - 2026-08-22
 

@@ -41,16 +41,24 @@ pub struct Config {
     pub debug_handler: serde_yaml::Value,
 }
 
+/// ICE/DTLS media-plane settings.
+///
+/// Candidate control (`node_ip`, `use_external_ip`, `ips`) is honored via the
+/// webrtc-rs setting engine. The fixed media-port fields (`udp_port`,
+/// `tcp_port`, `port_range_*`) are accepted for Go-config compatibility but
+/// **not enforced**: webrtc-rs 0.12 has no UDP port-range API, so the SFU
+/// binds ephemeral UDP ports and media relies on the advertised candidates /
+/// TURN (see readme.md "Differences from LiveKit").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RTCConfig {
-    /// UDP port for media. Defaults to `tcp_port` when unset (single port).
+    /// UDP port for media. Accepted for Go-config compatibility; not enforced.
     pub udp_port: u16,
-    /// TCP port for ICE/TCP fallback.
+    /// TCP port for ICE/TCP fallback. Accepted; not enforced.
     pub tcp_port: u16,
-    /// Inclusive start of the UDP media port range.
+    /// Inclusive start of the UDP media port range. Accepted; not enforced.
     pub port_range_start: u16,
-    /// Inclusive end of the UDP media port range.
+    /// Inclusive end of the UDP media port range. Accepted; not enforced.
     pub port_range_end: u16,
     pub use_external_ip: bool,
     pub ips: RTCIPConfig,
