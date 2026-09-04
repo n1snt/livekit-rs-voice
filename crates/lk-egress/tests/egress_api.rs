@@ -1031,3 +1031,96 @@ async fn list_egress_active_filter() {
     assert_eq!(items.len(), 1, "only the running egress is active: {active}");
     assert_eq!(items[0]["egressId"], b["egressId"]);
 }
+
+/// The recorder joins the room as a hidden EGRESS-kind participant whose
+/// identity is the egress id (Go `BuildEgressToken` parity), and is not
+/// announced to existing participants.
+#[tokio::test]
+async fn recorder_joins_as_hidden_egress_participant() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    let out_dir = std::env::temp_dir().join(format!("lk_egress_rec_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let (server, base) = start_stack(&out_dir).await;
+
+    // A publisher joins first so the room exists.
+    let mut pub_ws = ws_connect(&base, &join_token("rec-pub", "rec-room")).await;
+    let _join = read_response(&mut pub_ws).await;
+    let _offer = read_response(&mut pub_ws).await;
+
+    let (status, start) = start_room_composite(&base, "rec-room").await;
+    assert_eq!(status, 200, "{start}");
+    let egress_id = start["egressId"].as_str().unwrap().to_string();
+
+    // The recorder appears in ListParticipants as kind EGRESS with the egress
+    // id identity.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let room_admin = {
+        let now = lk_server::core::unix_seconds();
+        let payload = serde_json::json!({
+            "iss": API_KEY, "sub": "admin", "iat": now, "nbf": now - 5, "exp": now + 3600,
+            "video": {"roomAdmin": true, "room": "rec-room"}
+        });
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.typ = Some("JWT".to_string());
+        jsonwebtoken::encode(
+            &header,
+            &payload,
+            &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap()
+    };
+    let recorder_participant = loop {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/twirp/livekit.RoomService/ListParticipants"))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {room_admin}"))
+            .body(r#"{"room":"rec-room"}"#)
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+        if let Some(found) = body["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["identity"] == egress_id)
+        {
+            break found.clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "recorder never joined the room: {body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    assert_eq!(recorder_participant["kind"], "EGRESS");
+    assert_eq!(recorder_participant["permission"]["hidden"], true);
+    assert_eq!(recorder_participant["permission"]["recorder"], true);
+
+    // The recorder is NOT announced to the existing publisher: no
+    // ParticipantUpdate mentioning the recorder arrives on the publisher's ws.
+    let hidden = tokio::time::timeout(std::time::Duration::from_secs(2), read_response(&mut pub_ws))
+        .await;
+    match hidden {
+        Ok(resp) => match resp.message {
+            Some(lk::signal_response::Message::Update(u)) => {
+                assert!(
+                    !u.participants.iter().any(|p| p.identity == egress_id),
+                    "hidden recorder must not be announced"
+                );
+            }
+            _ => {}
+        },
+        Err(_) => {}
+    }
+
+    let (status, _) = stop_egress(&base, &egress_id).await;
+    assert_eq!(status, 200);
+    drop(pub_ws);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

@@ -33,7 +33,9 @@ pub struct AudioPacket {
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Mints an HS256 join token for a subscriber-only participant.
+/// Mints an HS256 join token for a subscriber-only participant, mirroring
+/// `egress.BuildEgressToken` in the Go egress: identity = the egress id,
+/// kind `EGRESS`, hidden + recorder grants, no publish permissions.
 fn join_token(
     api_key: &str,
     api_secret: &str,
@@ -49,14 +51,16 @@ fn join_token(
         "sub": identity,
         "iat": now,
         "nbf": now - 5,
-        "exp": now + 3600,
-        "kind": "egress",
+        "exp": now + 24 * 3600,
+        "kind": "EGRESS",
         "video": {
             "roomJoin": true,
             "room": room,
             "canPublish": false,
             "canSubscribe": true,
-            "canPublishData": true
+            "canPublishData": false,
+            "hidden": true,
+            "recorder": true
         }
     });
     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);

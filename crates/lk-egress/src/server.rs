@@ -604,12 +604,13 @@ async fn run_one(
         conf.mp3_bitrate
     };
     tracing::info!(egress_id, room = %spec.room, "starting recording");
+    // The Go egress joins with identity = the egress id (BuildEgressToken).
     let audio = client::connect(
         &conf.api_key,
         &conf.api_secret,
         &conf.ws_url,
         &spec.room,
-        &format!("egress_{egress_id}"),
+        egress_id,
     )
     .await?;
     tracing::info!(egress_id, room = %spec.room, "connected; recording");
