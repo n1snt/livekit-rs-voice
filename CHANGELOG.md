@@ -13,6 +13,29 @@ The fourth component, `R`, is our own build/patch revision for changes that do n
 
 The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision. See [docs/versioning.md](docs/versioning.md) for the full policy.
 
+## [Unreleased]
+
+### Changed
+
+- All permission failures now map to the reference Twirp `unauthenticated` (HTTP 401, `"permissions denied"`) instead of `permission_denied` (403): `roomAdmin`/`roomCreate`/`roomList` RoomService grants, `sip.admin`/`sip.call`, `roomRecord` (Egress), and the `/rtc`, `/rtc/validate` and `/agent` websockets. The Go server routes every grant check through `twirpAuthError`.
+- `TransferSIPParticipant` now requires the `roomAdmin` grant on the target room (reference `transferSIPParticipantRequest`), validates in the reference order, and reports `invalid_argument "no SIP session associated with participant"` / `not_found` for missing rooms/participants.
+- `CreateSIPParticipant` with `wait_until_answered` waits up to 80 s for the bridge (reference timeout) instead of the 30 s default.
+- `StartEgress` on a room that does not exist now fails with `not_found "requested room does not exist"` (reference `egressLauncher.StartEgress` loads the room), and the resolved `room_id` is echoed in `EgressInfo.room_id`.
+- `StopEgress` resolves "never existed" (`not_found "egress does not exist"`) and "already terminal" (`failed_precondition`) from the store without waiting on a psrpc selection timeout; `ListEgress` requires `roomRecord` and honors the `active` filter.
+- A dropped signal connection no longer tears the participant down immediately: the participant stays in the room for a 10 s reconnect window, and a client reconnecting with `reconnect=1` (or a `JoinRequest.reconnect`) and a matching identity/sid resumes the same participant (same sid, live media plane) and receives a `ReconnectResponse` followed by a `ParticipantUpdate` + `RoomUpdate`. Stale reconnects fall back to a fresh join.
+- Subscriber offers carry an incrementing id and a `midToTrackID` map so clients can attach the offered tracks.
+- `AddTrack`: video is rejected with `RequestResponse UNSUPPORTED_TYPE` and a publish without `canPublish` with `NOT_ALLOWED` (instead of fabricating an audio track or hanging the publish promise); `TrackPublished` echoes `muted`, `stereo`, `disable_red`, `disable_dtx`, `encryption`, `audio_features` and `backup_codec_policy`.
+- `ParticipantInfo.version` is monotonic (updates can be ordered by clients) and `joinedAt` is fixed at join time.
+- Participant updates about hidden participants are delivered only to the participant themselves (reference `broadcastParticipantState`); relayed data packets take their kind from the channel they arrived on and hidden senders' sid/identity are stripped.
+- A room at `max_participants` rejects the join with HTTP 500 `room has exceeded its max participants` before the websocket upgrade instead of silently closing the socket.
+- The recorder joins rooms as a hidden `EGRESS` participant whose identity is the egress id (reference `BuildEgressToken`: `hidden` + `recorder` grants, `canPublishData=false`, 24 h token), so recorders are not announced to other participants and are excluded from joins' `other_participants`.
+- `EgressInfo` timestamps are UnixNano (reference), `source_type` is `EGRESS_SOURCE_TYPE_SDK` for SDK sources, the echoed request keeps the original shape across `STARTING`/`ACTIVE`/`COMPLETE`/`FAILED`, and upload secrets + RTMP stream keys are redacted before the request is stored or returned.
+
+### Fixed
+
+- The psrpc client now grants exactly one claim per request, so with multiple egress/sip nodes a single request is never executed twice.
+- psrpc errors carry their reference codes (`invalid_argument`, `not_found`, `unavailable`, …) to the Twirp boundary instead of collapsing to `failed_precondition`/`internal`.
+
 ## [1.13.5.2] - 2026-08-25
 
 ### Added
