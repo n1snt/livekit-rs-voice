@@ -548,11 +548,56 @@ impl PsrpcClient {
 // PsrpcServer
 // ---------------------------------------------------------------------------
 
+/// A psrpc RPC error carrying the wire `code` (e.g. `invalid_argument`,
+/// `not_found`) so clients can map it to the reference Twirp/psrpc code
+/// instead of collapsing everything to `internal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcError {
+    pub code: String,
+    pub message: String,
+}
+
+impl RpcError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        RpcError {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+    pub fn invalid_argument(message: impl Into<String>) -> Self {
+        Self::new("invalid_argument", message)
+    }
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new("not_found", message)
+    }
+    pub fn already_exists(message: impl Into<String>) -> Self {
+        Self::new("already_exists", message)
+    }
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new("unavailable", message)
+    }
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new("internal", message)
+    }
+}
+
+impl From<String> for RpcError {
+    fn from(s: String) -> Self {
+        RpcError::internal(s)
+    }
+}
+
+impl From<prost::DecodeError> for RpcError {
+    fn from(e: prost::DecodeError) -> Self {
+        RpcError::internal(e.to_string())
+    }
+}
+
 /// Handler for one RPC method: takes the raw request payload and returns the
-/// raw response payload (or an error string that becomes the RPC error).
+/// raw response payload (or a coded RPC error).
 #[async_trait::async_trait]
 pub trait IoHandler: Send + Sync {
-    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String>;
+    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError>;
 }
 
 /// A psrpc server hosting a service. For each registered method it subscribes
@@ -661,8 +706,8 @@ impl PsrpcServer {
                         match handler.handle(&method, raw).await {
                             Ok(bytes) => resp.raw_response = bytes,
                             Err(e) => {
-                                resp.error = e;
-                                resp.code = "internal".to_string();
+                                resp.error = e.message;
+                                resp.code = e.code;
                             }
                         }
                         let _ = bus
@@ -891,8 +936,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl IoHandler for EchoHandler {
-        async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
-            let req = internal::Request::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+        async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError> {
+            let req = internal::Request::decode(raw.as_slice())?;
             let mut resp = internal::Request {
                 request_id: req.request_id,
                 ..Default::default()

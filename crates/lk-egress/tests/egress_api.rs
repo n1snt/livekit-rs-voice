@@ -834,3 +834,200 @@ async fn stop_unknown_egress_errors() {
     assert_eq!(body["code"], "not_found");
     assert_eq!(body["msg"], "egress does not exist");
 }
+/// The unified v2 `StartEgress` (media source + outputs) — what modern clients
+/// use — is served and echoes the request in `request.egress`.
+#[tokio::test]
+async fn v2_start_egress_with_media_source() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    let out_dir = std::env::temp_dir().join(format!("lk_egress_v2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let (server, base) = start_stack(&out_dir).await;
+    let _ = server;
+
+    // Create the room so room_id resolves.
+    let now = lk_server::core::unix_seconds();
+    let create_payload = serde_json::json!({
+        "iss": API_KEY, "sub": "admin", "iat": now, "nbf": now - 5, "exp": now + 3600,
+        "video": {"roomCreate": true}
+    });
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.typ = Some("JWT".to_string());
+    let create_token = jsonwebtoken::encode(
+        &header,
+        &create_payload,
+        &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/twirp/livekit.RoomService/CreateRoom"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {create_token}"))
+        .body(r#"{"name":"v2-room"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let room: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    let room_sid = room["sid"].as_str().unwrap().to_string();
+
+    // StartEgress with a media source (audio capture all) and a file output.
+    let req = lk::StartEgressRequest {
+        room_name: "v2-room".to_string(),
+        source: Some(lk::start_egress_request::Source::Media(lk::MediaSource {
+            audio: Some(lk::AudioConfig {
+                capture_all: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        outputs: vec![lk::Output {
+            config: Some(lk::output::Config::File(lk::FileOutput {
+                file_type: 0,
+                filepath: "/v2-rec".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/twirp/livekit.Egress/StartEgress"))
+        .header("Content-Type", "application/protobuf")
+        .header("Authorization", format!("Bearer {}", record_token()))
+        .body(req.encode_to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let info = lk::EgressInfo::decode(resp.bytes().await.unwrap().as_ref()).unwrap();
+
+    assert!(info.egress_id.starts_with("EG_"));
+    assert_eq!(info.room_name, "v2-room");
+    assert_eq!(info.room_id, room_sid);
+    assert_eq!(info.status, lk::EgressStatus::EgressStarting as i32);
+    assert_eq!(info.source_type, lk::EgressSourceType::Sdk as i32);
+    assert!(info.started_at >= 1_000_000_000_000_000);
+
+    // The request is echoed in `request.egress` with the media source.
+    match &info.request {
+        Some(lk::egress_info::Request::Egress(r)) => {
+            assert_eq!(r.room_name, "v2-room");
+            match &r.source {
+                Some(lk::start_egress_request::Source::Media(m)) => {
+                    assert_eq!(m.audio.as_ref().unwrap().capture_all, true);
+                }
+                other => panic!("expected media source, got {other:?}"),
+            }
+            assert_eq!(r.outputs.len(), 1);
+        }
+        other => panic!("expected request.egress, got {other:?}"),
+    }
+}
+
+/// Validation failures from the recorder surface as Twirp `invalid_argument`
+/// (the reference egress maps them the same way).
+#[tokio::test]
+async fn start_egress_missing_room_is_invalid_argument() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    let out_dir = std::env::temp_dir().join(format!("lk_egress_arg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let (server, base) = start_stack(&out_dir).await;
+    let _ = server;
+
+    // No room name on a media-source request -> the recorder rejects it.
+    let req = lk::StartEgressRequest {
+        source: Some(lk::start_egress_request::Source::Media(lk::MediaSource {
+            audio: Some(lk::AudioConfig {
+                capture_all: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+        outputs: vec![lk::Output {
+            config: Some(lk::output::Config::File(lk::FileOutput {
+                file_type: 0,
+                filepath: "/x".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/twirp/livekit.Egress/StartEgress"))
+        .header("Content-Type", "application/protobuf")
+        .header("Authorization", format!("Bearer {}", record_token()))
+        .body(req.encode_to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["code"], "invalid_argument");
+    assert_eq!(body["msg"], "room_name is required");
+}
+
+/// `ListEgress` with `active: true` returns only STARTING/ACTIVE recordings.
+#[tokio::test]
+async fn list_egress_active_filter() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    let out_dir = std::env::temp_dir().join(format!("lk_egress_active_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let (server, base) = start_stack(&out_dir).await;
+    let _ = server;
+
+    let (status, a) = start_room_composite(&base, "active-room").await;
+    assert_eq!(status, 200, "{a}");
+    let (status, b) = start_room_composite(&base, "active-room").await;
+    assert_eq!(status, 200, "{b}");
+
+    // Stop the first; it transitions to EGRESS_COMPLETE (no publisher needed —
+    // the recorder finalizes the empty recording).
+    let a_id = a["egressId"].as_str().unwrap().to_string();
+    let (status, _) = stop_egress(&base, &a_id).await;
+    assert_eq!(status, 200);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let all = list_egress(
+            &base,
+            serde_json::json!({"roomName": "active-room"}),
+        )
+        .await;
+        let items = all["items"].as_array().unwrap();
+        let complete = items
+            .iter()
+            .filter(|e| e["status"] == "EGRESS_COMPLETE")
+            .count();
+        if complete == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first egress did not complete: {all}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // The active filter returns only the still-running recording.
+    let active = list_egress(
+        &base,
+        serde_json::json!({"roomName": "active-room", "active": true}),
+    )
+    .await;
+    let items = active["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "only the running egress is active: {active}");
+    assert_eq!(items[0]["egressId"], b["egressId"]);
+}

@@ -20,7 +20,7 @@ use lk_proto::rpc;
 use prost::Message as _;
 use sha2::Digest;
 
-use crate::psrpc::IoHandler;
+use crate::psrpc::{IoHandler, RpcError};
 use crate::redis_store::Store;
 
 const ATTR_SIP_CALL_ID: &str = "sip.callID";
@@ -51,10 +51,11 @@ pub struct EgressIoHandlers {
 
 #[async_trait::async_trait]
 impl IoHandler for EgressIoHandlers {
-    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError> {
         match method {
             "CreateEgress" | "UpdateEgress" => {
-                let info = lk::EgressInfo::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+                let info =
+                    lk::EgressInfo::decode(raw.as_slice())?;
                 match method {
                     "CreateEgress" => {
                         // Reference parity: if the egress already exists in the
@@ -86,25 +87,31 @@ impl IoHandler for EgressIoHandlers {
                 }
                 Ok(lk_proto::well_known::Empty {}.encode_to_vec())
             }
-            _ => Err(format!("unknown IOInfo method: {method}")),
+            _ => Err(RpcError::internal(format!("unknown IOInfo method: {method}"))),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl IoHandler for SipIoHandlers {
-    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError> {
         match method {
             "GetSIPTrunkAuthentication" => {
                 let req = rpc::GetSipTrunkAuthenticationRequest::decode(raw.as_slice())
-                    .map_err(|e| e.to_string())?;
-                let resp = self.get_sip_trunk_authentication(&req).await?;
+                    ?;
+                let resp = self
+                    .get_sip_trunk_authentication(&req)
+                    .await
+                    ?;
                 Ok(resp.encode_to_vec())
             }
             "EvaluateSIPDispatchRules" => {
                 let req = rpc::EvaluateSipDispatchRulesRequest::decode(raw.as_slice())
-                    .map_err(|e| e.to_string())?;
-                let resp = self.evaluate_sip_dispatch_rules(&req).await?;
+                    ?;
+                let resp = self
+                    .evaluate_sip_dispatch_rules(&req)
+                    .await
+                    ?;
                 Ok(resp.encode_to_vec())
             }
             // Best-effort call-state recording; the reference server treats
@@ -112,7 +119,7 @@ impl IoHandler for SipIoHandlers {
             "UpdateSIPCallState" | "RecordCallContext" => {
                 Ok(lk_proto::well_known::Empty {}.encode_to_vec())
             }
-            _ => Err(format!("unknown IOInfoSIP method: {method}")),
+            _ => Err(RpcError::internal(format!("unknown IOInfoSIP method: {method}"))),
         }
     }
 }

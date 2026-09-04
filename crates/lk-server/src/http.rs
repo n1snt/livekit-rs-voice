@@ -82,6 +82,27 @@ impl TwirpError {
             msg: msg.into(),
         }
     }
+    pub fn unavailable(msg: impl Into<String>) -> Self {
+        TwirpError {
+            code: "unavailable",
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            msg: msg.into(),
+        }
+    }
+    pub fn resource_exhausted(msg: impl Into<String>) -> Self {
+        TwirpError {
+            code: "resource_exhausted",
+            status: StatusCode::TOO_MANY_REQUESTS,
+            msg: msg.into(),
+        }
+    }
+    pub fn unimplemented(msg: impl Into<String>) -> Self {
+        TwirpError {
+            code: "unimplemented",
+            status: StatusCode::NOT_IMPLEMENTED,
+            msg: msg.into(),
+        }
+    }
     pub fn bad_route(msg: impl Into<String>) -> Self {
         TwirpError {
             code: "bad_route",

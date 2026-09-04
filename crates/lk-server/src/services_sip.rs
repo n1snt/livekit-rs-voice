@@ -496,13 +496,26 @@ fn twirp_internal(e: String) -> TwirpError {
 const ATTR_SIP_CALL_ID: &str = "sip.callID";
 
 /// Maps a psrpc client error onto the matching Twirp error so API clients see
-/// the same semantics as the reference `livekit-server`.
+/// the same codes as the reference `livekit-server` (which maps psrpc codes
+/// onto Twirp codes, e.g. `invalid_argument`, `not_found`, `unavailable`).
 fn psrpc_to_twirp(e: crate::psrpc::PsrpcError) -> TwirpError {
     match e {
         crate::psrpc::PsrpcError::Timeout => {
-            TwirpError::deadline_exceeded("sip bridge did not respond in time")
+            TwirpError::deadline_exceeded("request timed out")
         }
-        crate::psrpc::PsrpcError::Rpc { message, .. } => TwirpError::failed_precondition(message),
+        crate::psrpc::PsrpcError::Rpc { code, message } => match code.as_str() {
+            "invalid_argument" => TwirpError::invalid_argument(message),
+            "not_found" => TwirpError::not_found(message),
+            "already_exists" => TwirpError::already_exists(message),
+            "permission_denied" => TwirpError::permission_denied(message),
+            "unauthenticated" => TwirpError::unauthenticated(message),
+            "unavailable" => TwirpError::unavailable(message),
+            "resource_exhausted" => TwirpError::resource_exhausted(message),
+            "unimplemented" => TwirpError::unimplemented(message),
+            "deadline_exceeded" => TwirpError::deadline_exceeded(message),
+            "canceled" => TwirpError::deadline_exceeded(message),
+            _ => TwirpError::internal(message),
+        },
         other => TwirpError::internal(other.to_string()),
     }
 }

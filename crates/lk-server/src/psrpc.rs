@@ -7,7 +7,7 @@
 pub use lk_psrpc::{
     claim_request_channel, claim_response_channel, envelope, response_channel, rpc_channel,
     unix_nanos, IoHandler, MemoryBus, PsrpcBus, PsrpcClient, PsrpcError, PsrpcServer, RedisBus,
-    RedisConfig,
+    RedisConfig, RpcError,
 };
 
 use std::sync::Arc;

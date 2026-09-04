@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use lk_proto::livekit as lk;
 use lk_proto::rpc;
-use lk_psrpc::{IoHandler, PsrpcBus, PsrpcServer};
+use lk_psrpc::{IoHandler, PsrpcBus, PsrpcServer, RpcError};
 use prost::Message as _;
 use tokio::sync::watch;
 
@@ -435,8 +435,8 @@ struct StopHandler {
 
 #[async_trait::async_trait]
 impl IoHandler for StopHandler {
-    async fn handle(&self, _method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
-        let req = lk::StopEgressRequest::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+    async fn handle(&self, _method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError> {
+        let req = lk::StopEgressRequest::decode(raw.as_slice())?;
         let egress_id = req.egress_id.clone();
         if let Some(tx) = self.stops.lock().unwrap().get(&egress_id) {
             let _ = tx.send(true);
@@ -447,36 +447,38 @@ impl IoHandler for StopHandler {
             .get(&egress_id)
             .cloned()
             .map(|i| i.encode_to_vec())
-            .ok_or_else(|| format!("egress {egress_id} not found"))
+            .ok_or_else(|| RpcError::not_found(format!("egress {egress_id} not found")))
     }
 }
 
 #[async_trait::async_trait]
 impl IoHandler for Handlers {
-    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, String> {
+    async fn handle(&self, method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError> {
         tracing::debug!(method, len = raw.len(), "psrpc request");
         match method {
             "StartEgress" => {
-                let req =
-                    rpc::StartEgressRequest::decode(raw.as_slice()).map_err(|e| e.to_string())?;
+                let req = rpc::StartEgressRequest::decode(raw.as_slice())
+                    ?;
                 let egress_id = req.egress_id.clone();
                 if egress_id.is_empty() {
-                    return Err("egress_id is required".to_string());
+                    return Err(RpcError::invalid_argument("egress_id is required"));
                 }
                 let (spec, room) = {
-                    let spec = rec_spec(&req, &self.conf)?;
+                    let spec = rec_spec(&req, &self.conf).map_err(RpcError::invalid_argument)?;
                     let room = spec.room.clone();
                     (spec, room)
                 };
                 if room.is_empty() {
-                    return Err("room_name is required".to_string());
+                    return Err(RpcError::invalid_argument("room_name is required"));
                 }
-                let request = request_info(&req).ok_or("unsupported egress request")?;
+                let request = request_info(&req).ok_or_else(|| {
+                    RpcError::invalid_argument("unsupported egress request")
+                })?;
                 if !admitted(&self.conf, self.active.lock().unwrap().len()) {
-                    return Err(format!(
+                    return Err(RpcError::unavailable(format!(
                         "egress node at capacity ({} active, cpu_cost admission)",
                         self.active.lock().unwrap().len()
-                    ));
+                    )));
                 }
 
                 let now = crate::now_nanos();
@@ -574,7 +576,7 @@ impl IoHandler for Handlers {
                 let ids: Vec<String> = self.active.lock().unwrap().iter().cloned().collect();
                 Ok(rpc::ListActiveEgressResponse { egress_ids: ids }.encode_to_vec())
             }
-            _ => Err(format!("unknown egress method: {method}")),
+            _ => Err(RpcError::internal(format!("unknown egress method: {method}"))),
         }
     }
 }
