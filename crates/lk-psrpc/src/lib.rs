@@ -149,6 +149,8 @@ impl PsrpcBus for RedisBus {
         channels: Vec<String>,
     ) -> Result<BoxStream<'static, (String, Vec<u8>)>, String> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let mut ready_tx = Some(ready_tx);
         let config = self.config.clone();
         // Owns the pubsub connection and re-subscribes if it is ever dropped,
         // so a transient disconnect does not silently kill the subscription.
@@ -190,6 +192,11 @@ impl PsrpcBus for RedisBus {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
+                // Signal readiness only once (the first subscribe): a publish
+                // racing ahead of the SUBSCRIBE would be lost on Redis.
+                if let Some(ready) = ready_tx.take() {
+                    let _ = ready.send(());
+                }
                 let mut stream = pubsub.on_message();
                 while let Some(msg) = stream.next().await {
                     let channel = msg.get_channel_name().to_string();
@@ -202,6 +209,9 @@ impl PsrpcBus for RedisBus {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
+        ready_rx
+            .await
+            .map_err(|_| "psrpc redis subscribe task died".to_string())?;
         let stream = futures_util::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         });

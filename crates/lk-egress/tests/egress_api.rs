@@ -1190,3 +1190,97 @@ async fn start_missing_room_is_not_found() {
     assert_eq!(body["code"], "not_found");
     assert_eq!(body["msg"], "requested room does not exist");
 }
+
+/// The full egress flow over a real Redis psrpc bus — the exact production
+/// topology (server + recorder sharing Redis). Gated on `REDIS_ADDR`.
+#[tokio::test]
+async fn full_flow_over_real_redis() {
+    let Some(addr) = std::env::var("REDIS_ADDR").ok() else {
+        eprintln!("skipping: REDIS_ADDR not set");
+        return;
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    let out_dir = std::env::temp_dir().join(format!("lk_egress_redis_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let mut config = test_config();
+    config.redis = lk_server::config::RedisConfig {
+        address: addr.clone(),
+        ..Default::default()
+    };
+    let server = Server::new(config);
+    let base = {
+        let app = http::router(server.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    };
+    // Server and recorder share one Redis bus (production topology).
+    let bus: Arc<dyn lk_psrpc::PsrpcBus> =
+        Arc::new(lk_psrpc::RedisBus::new(&lk_psrpc::RedisConfig {
+            address: addr,
+            ..Default::default()
+        }));
+    server.start_sip_io_with(bus.clone()).await.unwrap();
+    let _eg_client = server.egress_client_with(bus.clone()).await.unwrap();
+    let conf = EgressConfig {
+        api_key: API_KEY.to_string(),
+        api_secret: SECRET.to_string(),
+        ws_url: base.replace("http", "ws"),
+        output_dir: out_dir.to_str().unwrap().to_string(),
+        redis: Default::default(),
+        ..Default::default()
+    };
+    let io = IoClient::new(bus.clone()).await.unwrap();
+    let _egress = EgressServer::new(bus, conf, io).await.unwrap();
+
+    let (pub_ws, _pc, out_track) =
+        connect_publisher(&base, "redis-pub", "redis-room", "mic1").await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let stream = tokio::spawn(stream_audio(out_track.clone(), 3, 0x55555555, 1));
+
+    let (status, start) = start_room_composite(&base, "redis-room").await;
+    assert_eq!(status, 200, "{start}");
+    let egress_id = start["egressId"].as_str().unwrap().to_string();
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let (status, stopped) = stop_egress(&base, &egress_id).await;
+    assert_eq!(status, 200, "stop failed: {stopped}");
+    let _ = stream.await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let resp = list_egress_pb(
+            &base,
+            lk::ListEgressRequest {
+                egress_id: egress_id.clone(),
+                ..Default::default()
+            },
+        )
+        .await;
+        if let Some(item) = resp.items.first() {
+            if item.status == lk::EgressStatus::EgressComplete as i32 {
+                assert_eq!(item.egress_id, egress_id);
+                assert_eq!(item.room_name, "redis-room");
+                assert!(!item.file_results.is_empty());
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "egress did not complete over redis"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    drop(pub_ws);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
