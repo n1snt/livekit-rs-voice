@@ -393,3 +393,89 @@ async fn worker_requires_agent_grant() {
         "expected auth rejection, got: {msg}"
     );
 }
+
+/// Deleting a dispatch terminates its running job: the worker receives a
+/// JobTermination for the job id.
+#[tokio::test]
+async fn delete_dispatch_terminates_running_job() {
+    let (_server, base) = start_server().await;
+    let (mut ws, _worker_id, _info) = register_worker(&base).await;
+
+    let admin = admin_token("", json!({"roomCreate": true}));
+    let (status, _) = twirp(
+        &base,
+        "livekit.RoomService",
+        "CreateRoom",
+        &admin,
+        json!({"name": "term-room"}),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let room_admin = admin_token("term-room", json!({}));
+    let (status, dispatch) = twirp(
+        &base,
+        "livekit.AgentDispatchService",
+        "CreateDispatch",
+        &room_admin,
+        json!({"agentName": "voice-agent", "room": "term-room"}),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+    // Accept the job so it is assigned and running.
+    let availability = read_until(&mut ws, |m| {
+        matches!(
+            m.message,
+            Some(lk::server_message::Message::Availability(_))
+        )
+    })
+    .await;
+    let job_id = match availability.message {
+        Some(lk::server_message::Message::Availability(a)) => a.job.unwrap().id,
+        other => panic!("expected availability, got {other:?}"),
+    };
+    send_worker_msg(
+        &mut ws,
+        &lk::WorkerMessage {
+            message: Some(lk::worker_message::Message::Availability(
+                lk::AvailabilityResponse {
+                    job_id: job_id.clone(),
+                    available: true,
+                    ..Default::default()
+                },
+            )),
+        },
+    )
+    .await;
+    let assignment = read_until(&mut ws, |m| {
+        matches!(m.message, Some(lk::server_message::Message::Assignment(_)))
+    })
+    .await;
+    assert!(matches!(
+        assignment.message,
+        Some(lk::server_message::Message::Assignment(_))
+    ));
+
+    // Delete the dispatch -> the worker gets a termination for the job.
+    let (status, _) = twirp(
+        &base,
+        "livekit.AgentDispatchService",
+        "DeleteDispatch",
+        &room_admin,
+        json!({"room": "term-room", "dispatchId": dispatch_id}),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let termination = read_until(&mut ws, |m| {
+        matches!(m.message, Some(lk::server_message::Message::Termination(_)))
+    })
+    .await;
+    match termination.message {
+        Some(lk::server_message::Message::Termination(t)) => {
+            assert_eq!(t.job_id, job_id);
+        }
+        other => panic!("expected termination, got {other:?}"),
+    }
+    drop(ws);
+}
