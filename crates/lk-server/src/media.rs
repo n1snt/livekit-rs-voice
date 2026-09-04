@@ -6,7 +6,7 @@
 //! sender/receiver reports are handled by the default interceptor set.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lk_proto::livekit as lk;
@@ -188,6 +188,9 @@ pub struct ParticipantMedia {
     /// Serializes publisher/subscriber peer-connection creation so two
     /// concurrent calls cannot both pass the check-then-create and leak a PC.
     pub pc_create: Arc<AsyncMutex<()>>,
+    /// Incrementing id for subscriber offers (the reference numbers each SDP
+    /// offer so clients can correlate answers).
+    pub subscriber_offer_seq: AtomicU32,
 }
 
 /// Receiver side of a published audio track. Forwards every RTP packet to all
@@ -1185,6 +1188,23 @@ async fn subscribe_negotiation(participant: Arc<Participant>, force: bool) {
                 tracing::warn!(sid = %participant.sid, "set subscriber local description: {e}");
                 return;
             }
+            let offer_id = {
+                let media = participant.media.lock().unwrap();
+                media
+                    .subscriber_offer_seq
+                    .fetch_add(1, Ordering::Relaxed)
+                    .max(1)
+            };
+            // Map SDP mids to the subscribed track sids so clients can attach
+            // the tracks from the offer (reference `midToTrackID`).
+            let mut mid_to_track_id = std::collections::BTreeMap::new();
+            for tr in pc.get_transceivers().await {
+                if let Some(mid) = tr.mid() {
+                    if let Some(track) = tr.sender().await.track().await {
+                        mid_to_track_id.insert(mid.to_string(), track.id().to_string());
+                    }
+                }
+            }
             participant
                 .media
                 .lock()
@@ -1196,8 +1216,8 @@ async fn subscribe_negotiation(participant: Arc<Participant>, force: bool) {
                     lk::SessionDescription {
                         r#type: "offer".to_string(),
                         sdp: offer.sdp,
-                        id: 0,
-                        mid_to_track_id: Default::default(),
+                        id: offer_id,
+                        mid_to_track_id,
                     },
                 )),
             };

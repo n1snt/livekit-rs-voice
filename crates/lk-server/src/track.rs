@@ -90,6 +90,12 @@ pub struct PublishedTrack {
     pub version: Mutex<TimedVersion>,
     /// Redundant encoding (audio/red) enabled by the publisher.
     pub red_enabled: AtomicBool,
+    /// Negotiated track attributes echoed in `TrackInfo` (reference parity).
+    pub encryption: i32,
+    pub stereo: bool,
+    pub disable_dtx: bool,
+    pub audio_features: Vec<i32>,
+    pub backup_codec_policy: i32,
 }
 
 impl PublishedTrack {
@@ -106,6 +112,11 @@ impl PublishedTrack {
             mid: Mutex::new(None),
             version: Mutex::new(TimedVersion::new()),
             red_enabled: AtomicBool::new(false),
+            encryption: 0,
+            stereo: false,
+            disable_dtx: false,
+            audio_features: Vec::new(),
+            backup_codec_policy: 0,
         }
     }
 
@@ -150,11 +161,18 @@ impl PublishedTrack {
             name: self.name.clone(),
             muted: self.is_muted(),
             source: self.source.to_proto(),
+            #[allow(deprecated)]
+            disable_dtx: self.disable_dtx,
             mime_type: mime.clone(),
             mid: self.get_mid().unwrap_or_default(),
+            #[allow(deprecated)]
+            stereo: self.stereo,
             disable_red: !self.red_enabled.load(Ordering::Relaxed),
+            encryption: self.encryption,
             version: self.version.lock().unwrap().to_proto(),
             stream: self.stream.clone(),
+            audio_features: self.audio_features.clone(),
+            backup_codec_policy: self.backup_codec_policy,
             ..Default::default()
         }
     }

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 use lk_proto::livekit as lk;
 use tokio::sync::mpsc;
 
-use crate::core::{unix_millis, unix_seconds, ParticipantKind, ParticipantSid, VersionCounter};
+use crate::core::{unix_millis, ParticipantKind, ParticipantSid, VersionCounter};
 use crate::media::ParticipantMedia;
 use crate::track::PublishedTrack;
 use crate::{auth, room::Room};
@@ -271,10 +271,12 @@ impl Participant {
             state: self.state().to_proto(),
             tracks: self.track_infos(),
             metadata: self.metadata.lock().unwrap().clone(),
-            joined_at: unix_seconds(),
+            joined_at: self.joined_at_ms / 1000,
             joined_at_ms: self.joined_at_ms,
             name: self.name.lock().unwrap().clone(),
-            version: self.version.get(),
+            // Each serialization gets a fresh version so clients can order
+            // updates (reference `ToProtoWithVersion`).
+            version: self.version.next(),
             permission: Some(permission),
             is_publisher: self.is_publisher.load(Ordering::Relaxed),
             kind: self.kind.to_proto(),

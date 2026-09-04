@@ -264,11 +264,20 @@ impl Room {
 
     /// Broadcasts a `SignalResponse::Update` with the given participant infos.
     /// `except` excludes a participant sid (e.g. the publisher themselves).
+    /// Reference parity (`broadcastParticipantState`): updates about a hidden
+    /// participant are delivered only to that participant itself; updates
+    /// about normal participants go to everyone.
     pub fn broadcast_participant_update(
         &self,
         infos: Vec<lk::ParticipantInfo>,
         except: Option<&str>,
     ) {
+        let hidden_sids: std::collections::HashSet<String> = infos
+            .iter()
+            .filter(|i| i.permission.as_ref().map(|p| p.hidden).unwrap_or(false))
+            .map(|i| i.sid.clone())
+            .collect();
+        let hidden_only = !hidden_sids.is_empty() && hidden_sids.len() == infos.len();
         let resp = lk::SignalResponse {
             message: Some(lk::signal_response::Message::Update(
                 lk::ParticipantUpdate {
@@ -280,6 +289,7 @@ impl Room {
             .participants()
             .into_iter()
             .filter(|p| except.map(|sid| sid != p.sid).unwrap_or(true))
+            .filter(|p| !hidden_only || hidden_sids.contains(&p.sid))
             .collect();
         for p in targets {
             p.send_update(resp.clone());

@@ -320,6 +320,32 @@ async fn rtc_ws_impl(
         return TwirpError::invalid_argument("identity is required").into_response();
     }
 
+    // Reference parity: a full room rejects the connection before the
+    // websocket upgrade (HTTP 500 with the room error), instead of silently
+    // closing the socket after the upgrade.
+    if let Some(room) = server.get_room(&token.video.room) {
+        let full = {
+            let max = room
+                .max_participants
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if max == 0 {
+                false
+            } else {
+                let p = room.participants();
+                let count = p.iter().filter(|x| !x.kind.is_dependent()).count();
+                count >= max as usize
+            }
+        };
+        if full {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "room has exceeded its max participants",
+            )
+                .into_response();
+        }
+    }
+
     let session = match build_session_params(&token, &params, is_v1) {
         Ok(p) => p,
         Err(e) => return e.into_response(),

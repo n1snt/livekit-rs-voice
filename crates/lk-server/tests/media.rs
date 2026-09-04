@@ -448,11 +448,22 @@ async fn audio_flows_from_publisher_to_subscriber() {
         matches!(r.message, Some(lk::signal_response::Message::Offer(_)))
     })
     .await;
-    let sub_offer2_sdp = match resp.message {
-        Some(lk::signal_response::Message::Offer(o)) => o.sdp,
+    let (sub_offer2_sdp, sub_offer2_id, sub_offer2_mids) = match resp.message {
+        Some(lk::signal_response::Message::Offer(o)) => (o.sdp, o.id, o.mid_to_track_id),
         other => panic!("expected second subscriber offer, got {other:?}"),
     };
     drop(guard);
+
+    // The offer carries an id and maps the audio SDP mid to the track sid
+    // (the reference numbers offers and sends `midToTrackID`).
+    assert!(
+        sub_offer2_id > 0,
+        "subscriber offer must carry a nonzero id (got {sub_offer2_id})"
+    );
+    assert!(
+        sub_offer2_mids.values().any(|sid| sid.starts_with("TR_")),
+        "subscriber offer must map a mid to a track sid: {sub_offer2_mids:?}"
+    );
 
     let mut sub_offer2 = RTCSessionDescription::default();
     sub_offer2.sdp_type = RTCSdpType::Offer;

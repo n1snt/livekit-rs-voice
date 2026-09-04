@@ -324,3 +324,165 @@ async fn oversized_signal_frame_closes_1009() {
         "oversized frame must close with 1009 (message too big)"
     );
 }
+
+/// A video AddTrack is rejected with a coded UNSUPPORTED_TYPE response (the
+/// reference replies via RequestResponse; voice-only has no video plane).
+#[tokio::test]
+async fn video_add_track_gets_unsupported_type() {
+    let (_server, base) = start_server().await;
+    let mut ws = ws_connect(&base, &join_token("video-pub", "video-room")).await;
+    let _join = expect_join(&mut ws).await;
+
+    send_request(
+        &mut ws,
+        &lk::SignalRequest {
+            message: Some(lk::signal_request::Message::AddTrack(lk::AddTrackRequest {
+                cid: "cam1".to_string(),
+                name: "camera".to_string(),
+                r#type: lk::TrackType::Video as i32,
+                source: lk::TrackSource::Camera as i32,
+                ..Default::default()
+            })),
+        },
+    )
+    .await;
+    let resp = await_message(&mut ws, |r| {
+        matches!(
+            r.message,
+            Some(lk::signal_response::Message::RequestResponse(_))
+        )
+    })
+    .await;
+    match resp.message {
+        Some(lk::signal_response::Message::RequestResponse(rr)) => {
+            assert_eq!(
+                rr.reason,
+                lk::request_response::Reason::UnsupportedType as i32
+            );
+            assert!(matches!(
+                rr.request,
+                Some(lk::request_response::Request::AddTrack(_))
+            ));
+        }
+        other => panic!("expected RequestResponse, got {other:?}"),
+    }
+    drop(ws);
+}
+
+/// A publish without the canPublish permission gets NOT_ALLOWED instead of
+/// hanging the client's publish promise.
+#[tokio::test]
+async fn publish_without_permission_gets_not_allowed() {
+    let (_server, base) = start_server().await;
+    // Join with canPublish: false.
+    let token = join_token_with(
+        "no-pub",
+        "nopub-room",
+        serde_json::json!({"canPublish": false}),
+        serde_json::json!({}),
+    );
+    let mut ws = ws_connect(&base, &token).await;
+    let _join = expect_join(&mut ws).await;
+
+    send_request(
+        &mut ws,
+        &lk::SignalRequest {
+            message: Some(lk::signal_request::Message::AddTrack(lk::AddTrackRequest {
+                cid: "mic1".to_string(),
+                name: "mic".to_string(),
+                r#type: lk::TrackType::Audio as i32,
+                source: lk::TrackSource::Microphone as i32,
+                ..Default::default()
+            })),
+        },
+    )
+    .await;
+    let resp = await_message(&mut ws, |r| {
+        matches!(
+            r.message,
+            Some(lk::signal_response::Message::RequestResponse(_))
+        )
+    })
+    .await;
+    match resp.message {
+        Some(lk::signal_response::Message::RequestResponse(rr)) => {
+            assert_eq!(rr.reason, lk::request_response::Reason::NotAllowed as i32);
+        }
+        other => panic!("expected RequestResponse, got {other:?}"),
+    }
+    drop(ws);
+}
+
+/// TrackPublished echoes the negotiated attributes (muted, stereo, red,
+/// encryption) from the AddTrack request.
+#[tokio::test]
+async fn track_published_echoes_negotiated_attributes() {
+    let (_server, base) = start_server().await;
+    let mut ws = ws_connect(&base, &join_token("attr-pub", "attr-room")).await;
+    let _join = expect_join(&mut ws).await;
+
+    send_request(
+        &mut ws,
+        &lk::SignalRequest {
+            message: Some(lk::signal_request::Message::AddTrack(lk::AddTrackRequest {
+                cid: "mic1".to_string(),
+                name: "mic".to_string(),
+                r#type: lk::TrackType::Audio as i32,
+                source: lk::TrackSource::Microphone as i32,
+                muted: true,
+                disable_red: true,
+                #[allow(deprecated)]
+                stereo: true,
+                encryption: 1, // E2EE
+                ..Default::default()
+            })),
+        },
+    )
+    .await;
+    let resp = await_message(&mut ws, |r| {
+        matches!(
+            r.message,
+            Some(lk::signal_response::Message::TrackPublished(_))
+        )
+    })
+    .await;
+    let track = match resp.message {
+        Some(lk::signal_response::Message::TrackPublished(tp)) => tp.track.unwrap(),
+        other => panic!("expected TrackPublished, got {other:?}"),
+    };
+    assert_eq!(track.r#type, lk::TrackType::Audio as i32);
+    assert!(track.muted);
+    assert!(track.disable_red);
+    #[allow(deprecated)]
+    let stereo = track.stereo;
+    assert!(stereo, "stereo must be echoed");
+    assert_eq!(track.encryption, 1);
+    drop(ws);
+}
+
+/// A room at its max participants rejects new joins with an HTTP 500 before
+/// the websocket upgrade (reference `ErrMaxParticipantsExceeded`).
+#[tokio::test]
+async fn full_room_rejects_join_with_http_error() {
+    let mut config = test_config();
+    config.room.max_participants = 1;
+    let (_server, base) = start_server_with(config).await;
+
+    // First participant joins fine.
+    let mut ws = ws_connect(&base, &join_token("first", "full-room")).await;
+    let _join = expect_join(&mut ws).await;
+
+    // Second participant gets an HTTP 500 with the room error before upgrade.
+    let url = format!(
+        "{}/rtc?access_token={}",
+        base.replace("http", "ws"),
+        join_token("second", "full-room")
+    );
+    let resp = tokio_tungstenite::connect_async(&url).await;
+    let err = resp.expect_err("join must be rejected");
+    assert!(
+        err.to_string().contains("500"),
+        "expected HTTP 500, got: {err}"
+    );
+    drop(ws);
+}

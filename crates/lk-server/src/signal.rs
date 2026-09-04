@@ -299,43 +299,74 @@ async fn handle_answer(participant: &Arc<Participant>, answer: lk::SessionDescri
 }
 
 async fn handle_add_track(participant: &Arc<Participant>, req: lk::AddTrackRequest) {
+    if !participant.can_publish() {
+        // Reference parity: reject with a coded request response instead of
+        // leaving the client's publish promise hanging.
+        send_request_response(
+            participant,
+            lk::request_response::Reason::NotAllowed,
+            req.clone(),
+        )
+        .await;
+        return;
+    }
     if req.r#type != lk::TrackType::Audio as i32 {
-        // Voice-only server: video is out of scope. Respond with a published
-        // track (without registering it) so the publisher's publish promise
-        // resolves instead of hanging; the media plane ignores non-audio RTP.
+        // Voice-only server: video is unsupported. Reject with the reference
+        // UNSUPPORTED_TYPE response rather than fabricating an audio track.
         tracing::warn!(sid = %participant.sid, cid = %req.cid, "rejecting non-audio track publish");
-        let track = Arc::new(PublishedTrack::new(
-            req.name,
-            req.cid.clone(),
-            TrackSource::from_proto(req.source),
-            req.stream,
-        ));
-        let resp = lk::SignalResponse {
-            message: Some(lk::signal_response::Message::TrackPublished(
-                lk::TrackPublishedResponse {
-                    cid: req.cid,
-                    track: Some(track.to_proto()),
-                },
-            )),
-        };
-        participant.send(resp).await;
+        send_request_response(
+            participant,
+            lk::request_response::Reason::UnsupportedType,
+            req.clone(),
+        )
+        .await;
         return;
     }
-    if !participant.permission.lock().unwrap().can_publish {
-        return;
-    }
-    let track = Arc::new(PublishedTrack::new(
-        req.name,
+    #[allow(deprecated)]
+    let mut track = PublishedTrack::new(
+        req.name.clone(),
         req.cid.clone(),
         TrackSource::from_proto(req.source),
-        req.stream,
-    ));
+        req.stream.clone(),
+    );
+    if req.muted {
+        track.set_muted(true);
+    }
+    track.red_enabled.store(!req.disable_red, Ordering::Relaxed);
+    track.encryption = req.encryption;
+    #[allow(deprecated)]
+    {
+        track.stereo = req.stereo;
+        track.disable_dtx = req.disable_dtx;
+    }
+    track.audio_features = req.audio_features.clone();
+    track.backup_codec_policy = req.backup_codec_policy;
+    let track = Arc::new(track);
     participant.add_track(track.clone());
     let resp = lk::SignalResponse {
         message: Some(lk::signal_response::Message::TrackPublished(
             lk::TrackPublishedResponse {
                 cid: req.cid,
                 track: Some(track.to_proto()),
+            },
+        )),
+    };
+    participant.send(resp).await;
+}
+
+/// Sends a `RequestResponse` echoing the failed `AddTrackRequest`, mirroring
+/// `ParticipantImpl.sendRequestResponse`.
+async fn send_request_response(
+    participant: &Arc<Participant>,
+    reason: lk::request_response::Reason,
+    req: lk::AddTrackRequest,
+) {
+    let resp = lk::SignalResponse {
+        message: Some(lk::signal_response::Message::RequestResponse(
+            lk::RequestResponse {
+                reason: reason as i32,
+                request: Some(lk::request_response::Request::AddTrack(req)),
+                ..Default::default()
             },
         )),
     };
