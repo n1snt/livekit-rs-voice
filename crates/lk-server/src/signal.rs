@@ -165,8 +165,10 @@ pub async fn on_media_disconnected(participant: &Arc<Participant>, failed: bool)
 }
 
 /// Handles a data packet received on a data channel: validates permissions and
-/// broadcasts to the room with destination filtering.
-pub async fn handle_incoming_data(participant: &Arc<Participant>, data: &[u8]) {
+/// broadcasts to the room with destination filtering. `lossy` tells the
+/// channel the packet arrived on; the reference overwrites the packet kind
+/// with the channel ("trust the channel").
+pub async fn handle_incoming_data(participant: &Arc<Participant>, data: &[u8], lossy: bool) {
     let Ok(packet) = lk::DataPacket::decode(data) else {
         return;
     };
@@ -177,14 +179,30 @@ pub async fn handle_incoming_data(participant: &Arc<Participant>, data: &[u8]) {
     let Some(room) = participant.room() else {
         return;
     };
+    let sender_hidden = participant.permission.lock().unwrap().hidden;
 
-    // Normalize sender fields and route to destinations.
+    // Normalize sender fields and route to destinations. The packet kind is
+    // taken from the channel it arrived on (reference `handleDataPacket`), and
+    // hidden participants do not expose their sid/identity to recipients.
     let mut out = packet.clone();
-    if out.participant_identity.is_empty() {
-        out.participant_identity = participant.identity.clone();
+    #[allow(deprecated)]
+    {
+        out.kind = if lossy {
+            lk::data_packet::Kind::Lossy as i32
+        } else {
+            lk::data_packet::Kind::Reliable as i32
+        };
     }
-    if out.participant_sid.is_empty() {
-        out.participant_sid = participant.sid.clone();
+    if sender_hidden {
+        out.participant_identity = String::new();
+        out.participant_sid = String::new();
+    } else {
+        if out.participant_identity.is_empty() {
+            out.participant_identity = participant.identity.clone();
+        }
+        if out.participant_sid.is_empty() {
+            out.participant_sid = participant.sid.clone();
+        }
     }
     // Never echo back to the sender. Route by explicit sid/identity destinations.
     let dest_identities = out.destination_identities.clone();

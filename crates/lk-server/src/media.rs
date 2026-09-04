@@ -623,7 +623,7 @@ pub async fn setup_subscriber(participant: &Arc<Participant>) -> Result<(), Stri
         let p = p2.clone();
         Box::pin(async move {
             if let Some(p) = p.upgrade() {
-                crate::signal::handle_incoming_data(&p, &data.data).await;
+                crate::signal::handle_incoming_data(&p, &data.data, false).await;
             }
         })
     }));
@@ -632,7 +632,7 @@ pub async fn setup_subscriber(participant: &Arc<Participant>) -> Result<(), Stri
         let p = p3.clone();
         Box::pin(async move {
             if let Some(p) = p.upgrade() {
-                crate::signal::handle_incoming_data(&p, &data.data).await;
+                crate::signal::handle_incoming_data(&p, &data.data, true).await;
             }
         })
     }));
@@ -641,7 +641,7 @@ pub async fn setup_subscriber(participant: &Arc<Participant>) -> Result<(), Stri
         let p = p6.clone();
         Box::pin(async move {
             if let Some(p) = p.upgrade() {
-                crate::signal::handle_incoming_data(&p, &data.data).await;
+                crate::signal::handle_incoming_data(&p, &data.data, false).await;
             }
         })
     }));
@@ -755,12 +755,15 @@ pub async fn ensure_publisher(
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
         let p = p_data.clone();
         Box::pin(async move {
+            // LiveKit labels the server's data channels `_reliable`/`_lossy`;
+            // the reference trusts the channel for the packet kind.
+            let lossy = dc.label().contains("lossy");
             let p2 = p.clone();
             dc.on_message(Box::new(move |data| {
                 let p = p2.clone();
                 Box::pin(async move {
                     if let Some(p) = p.upgrade() {
-                        crate::signal::handle_incoming_data(&p, &data.data).await;
+                        crate::signal::handle_incoming_data(&p, &data.data, lossy).await;
                     }
                 })
             }));
