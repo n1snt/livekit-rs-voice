@@ -9,13 +9,12 @@ use crate::http::{Req, TwirpError, WireFormat};
 use crate::server::Server;
 
 /// Checks `roomAdmin` permission and room match (reference `EnsureAdminPermission`).
-fn ensure_admin(req: &Req, room: &str) -> Result<(), TwirpError> {
+/// Grant failures map to Twirp `unauthenticated` (401) via `twirpAuthError`.
+pub(crate) fn ensure_admin(req: &Req, room: &str) -> Result<(), TwirpError> {
     if req.token.video.room_admin && req.token.video.room == room {
         Ok(())
     } else {
-        Err(TwirpError::permission_denied(
-            "room admin permission denied",
-        ))
+        Err(TwirpError::unauthenticated("permissions denied"))
     }
 }
 
@@ -23,9 +22,7 @@ fn ensure_create(req: &Req) -> Result<(), TwirpError> {
     if req.token.video.room_create {
         Ok(())
     } else {
-        Err(TwirpError::permission_denied(
-            "roomCreate permission denied",
-        ))
+        Err(TwirpError::unauthenticated("permissions denied"))
     }
 }
 
@@ -33,7 +30,7 @@ fn ensure_list(req: &Req) -> Result<(), TwirpError> {
     if req.token.video.room_list {
         Ok(())
     } else {
-        Err(TwirpError::permission_denied("roomList permission denied"))
+        Err(TwirpError::unauthenticated("permissions denied"))
     }
 }
 

@@ -35,8 +35,8 @@ async fn rejects_invalid_tokens() {
 }
 
 /// Each RoomService method requires its documented grant; a token without it
-/// gets `permission_denied` (403), and the reference error code string is
-/// preserved in the JSON body.
+/// gets `unauthenticated` (401) — the reference maps grant failures through
+/// `twirpAuthError` — and the error code string is preserved in the JSON body.
 #[tokio::test]
 async fn room_service_permission_matrix() {
     let (_server, base) = start_server().await;
@@ -96,10 +96,10 @@ async fn room_service_permission_matrix() {
         .await;
         assert_eq!(
             status,
-            reqwest::StatusCode::FORBIDDEN,
-            "{method} should be forbidden for a join-only token"
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{method} should be unauthorized for a join-only token"
         );
-        assert_eq!(v["code"], "permission_denied", "{method} code mismatch");
+        assert_eq!(v["code"], "unauthenticated", "{method} code mismatch");
     }
     drop(ws);
 }
@@ -118,15 +118,15 @@ async fn admin_requires_matching_room() {
         json!({"room": "room-b"}),
     )
     .await;
-    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
-    assert_eq!(v["code"], "permission_denied");
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(v["code"], "unauthenticated");
 }
 
 /// Egress Twirp methods require the `roomRecord` grant.
 #[tokio::test]
 async fn egress_requires_record_grant() {
     let (_server, base) = start_server().await;
-    // A join token has no roomRecord -> egress start is forbidden.
+    // A join token has no roomRecord -> egress start is unauthorized.
     let join_only = join_token("alice", "egress-room");
     let (status, v) = twirp(
         &base,
@@ -136,8 +136,8 @@ async fn egress_requires_record_grant() {
         json!({"roomName": "egress-room", "fileOutputs": [{"filepath": "/r"}]}),
     )
     .await;
-    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
-    assert_eq!(v["code"], "permission_denied");
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(v["code"], "unauthenticated");
 }
 
 /// A token carrying the right grant succeeds (sanity: ListRooms with roomList).

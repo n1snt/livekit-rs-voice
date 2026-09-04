@@ -290,7 +290,7 @@ async fn rtc_ws_impl(
         Err(e) => return e.into_response(),
     };
     if !token.video.room_join {
-        return TwirpError::permission_denied("join permission denied").into_response();
+        return TwirpError::unauthenticated("no permissions to access the room").into_response();
     }
     if token.video.room.is_empty() {
         return TwirpError::invalid_argument("room is required").into_response();
@@ -448,7 +448,7 @@ async fn agent_ws(
         Err(e) => return e.into_response(),
     };
     if !token.video.agent {
-        return TwirpError::permission_denied("agent permission denied").into_response();
+        return TwirpError::unauthenticated("no permissions to access the room").into_response();
     }
     let max = server.config.limit.agent_signal_message_size_limit;
     ws.max_message_size(max)
@@ -472,7 +472,7 @@ async fn validate_rtc(
 ) -> Response {
     match authenticate(&server, &headers, &query) {
         Ok(token) if token.video.room_join => (StatusCode::OK, "success").into_response(),
-        Ok(_) => TwirpError::permission_denied("join permission denied").into_response(),
+        Ok(_) => TwirpError::unauthenticated("no permissions to access the room").into_response(),
         Err(e) => e.into_response(),
     }
 }

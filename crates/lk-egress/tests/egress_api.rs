@@ -544,8 +544,8 @@ async fn list_egress_filters_and_roundtrips() {
     assert!(resp["nextPageToken"].is_null());
 }
 
-/// Starting a recording requires the `roomRecord` grant; other tokens get a
-/// Twirp permission-denied (403).
+/// Starting a recording requires the `roomRecord` grant; other tokens get the
+/// reference `unauthenticated` (401) Twirp error.
 #[tokio::test]
 async fn start_requires_record_permission() {
     let _ = tracing_subscriber::fmt()
@@ -581,9 +581,9 @@ async fn start_requires_record_permission() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 401);
     let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert_eq!(body["code"], "permission_denied");
+    assert_eq!(body["code"], "unauthenticated");
 }
 
 /// Full lifecycle: start, record real audio, stop, and observe the store end

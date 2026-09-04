@@ -245,5 +245,7 @@ async fn requires_sip_call_permission() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    // Missing sip.call maps to twirp unauthenticated (reference
+    // `EnsureSIPCallPermission` -> `twirpAuthError`).
+    assert_eq!(resp.status(), 401);
 }

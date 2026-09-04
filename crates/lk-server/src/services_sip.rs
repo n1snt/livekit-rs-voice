@@ -19,7 +19,7 @@ fn ensure_sip_admin(req: &Req) -> Result<(), TwirpError> {
     if req.token.sip.admin {
         Ok(())
     } else {
-        Err(TwirpError::permission_denied("sip admin permission denied"))
+        Err(TwirpError::unauthenticated("permissions denied"))
     }
 }
 
@@ -27,7 +27,7 @@ fn ensure_sip_call(req: &Req) -> Result<(), TwirpError> {
     if req.token.sip.call {
         Ok(())
     } else {
-        Err(TwirpError::permission_denied("sip call permission denied"))
+        Err(TwirpError::unauthenticated("permissions denied"))
     }
 }
 
@@ -35,9 +35,7 @@ fn ensure_record(req: &Req) -> Result<(), TwirpError> {
     if req.token.video.room_record {
         Ok(())
     } else {
-        Err(TwirpError::permission_denied(
-            "roomRecord permission denied",
-        ))
+        Err(TwirpError::unauthenticated("permissions denied"))
     }
 }
 
@@ -410,27 +408,39 @@ pub async fn sip_service(
             )
         }
         "TransferSIPParticipant" => {
-            ensure_sip_call(req)?;
             let r: lk::TransferSipParticipantRequest = parse_body(body, format)?;
-            if r.transfer_to.is_empty() {
-                return Err(TwirpError::invalid_argument("transferTo is required"));
-            }
+            // Reference validation order: room, identity, sip.call grant,
+            // roomAdmin grant, transfer target, then participant lookup.
             if r.room_name.is_empty() {
-                return Err(TwirpError::invalid_argument("room_name is required"));
+                return Err(TwirpError::invalid_argument("Missing room name"));
+            }
+            if r.participant_identity.is_empty() {
+                return Err(TwirpError::invalid_argument(
+                    "Missing participant identity",
+                ));
+            }
+            ensure_sip_call(req)?;
+            crate::services::ensure_admin(req, &r.room_name)?;
+            if r.transfer_to.is_empty() {
+                return Err(TwirpError::invalid_argument("Missing transferTo"));
             }
             let room = server
                 .get_room(&r.room_name)
-                .ok_or_else(|| TwirpError::not_found("room not found"))?;
+                .ok_or_else(|| TwirpError::not_found("requested room does not exist"))?;
             let participant = room
                 .get_participant_by_identity(&r.participant_identity)
-                .ok_or_else(|| TwirpError::not_found("participant not found"))?;
+                .ok_or_else(|| TwirpError::not_found("participant does not exist"))?;
             let sip_call_id = participant
                 .attributes
                 .lock()
                 .unwrap()
                 .get(ATTR_SIP_CALL_ID)
                 .cloned()
-                .ok_or_else(|| TwirpError::failed_precondition("participant is not a SIP participant"))?;
+                .ok_or_else(|| {
+                    TwirpError::invalid_argument(
+                        "no SIP session associated with participant",
+                    )
+                })?;
             let ireq = lk_proto::rpc::InternalTransferSipParticipantRequest {
                 sip_call_id: sip_call_id.clone(),
                 transfer_to: r.transfer_to,

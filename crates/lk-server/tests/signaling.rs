@@ -198,7 +198,7 @@ async fn validate_requires_join_grant() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
-    // Join grant missing -> 403
+    // Join grant missing -> 401 (reference `ValidateConnectRequest`)
     let admin_token = raw_token(serde_json::json!({"roomCreate": true, "room": "room-a"}));
     let resp = client
         .get(format!("{base}/rtc/validate"))
@@ -206,7 +206,7 @@ async fn validate_requires_join_grant() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 401);
 }
 
 #[tokio::test]
@@ -275,7 +275,8 @@ async fn twirp_requires_auth() {
 async fn twirp_permissions_enforced() {
     let (_server, base) = start_server().await;
     let client = reqwest::Client::new();
-    // Join-only token has no roomCreate -> CreateRoom must be forbidden
+    // Join-only token has no roomCreate -> CreateRoom must be unauthorized
+    // (the reference maps grant failures to twirp unauthenticated).
     let token = join_token("bob", "room-a", serde_json::json!({}));
     let resp = client
         .post(format!("{base}/twirp/livekit.RoomService/CreateRoom"))
@@ -285,9 +286,9 @@ async fn twirp_permissions_enforced() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 401);
     let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
-    assert_eq!(body["code"], "permission_denied");
+    assert_eq!(body["code"], "unauthenticated");
 }
 
 #[tokio::test]
