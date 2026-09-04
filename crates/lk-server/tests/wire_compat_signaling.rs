@@ -486,3 +486,107 @@ async fn full_room_rejects_join_with_http_error() {
     );
     drop(ws);
 }
+
+/// A client that drops its socket and reconnects with `reconnect=1` resumes
+/// the same participant (same sid) and receives a ReconnectResponse followed
+/// by a ParticipantUpdate + RoomUpdate (reference ResumeParticipant).
+#[tokio::test]
+async fn reconnect_resumes_same_participant() {
+    let (_server, base) = start_server().await;
+    let token = join_token("reconnector", "reconnect-room");
+    let mut ws = ws_connect(&base, &token).await;
+    let join = expect_join(&mut ws).await;
+    let sid = join.participant.as_ref().unwrap().sid.clone();
+    let _sub_offer = read_response(&mut ws).await; // subscriber offer
+
+    // Simulate a network drop (close the socket without Leave).
+    drop(ws);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Reconnect with the same token + reconnect=1 + the old sid.
+    let url = format!(
+        "{}/rtc?access_token={}&reconnect=1&sid={}",
+        base.replace("http", "ws"),
+        token,
+        sid
+    );
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // First frame is a ReconnectResponse with the same sid's server info.
+    let resp = read_response(&mut ws2).await;
+    match resp.message {
+        Some(lk::signal_response::Message::Reconnect(r)) => {
+            assert!(!r.server_info.as_ref().unwrap().node_id.is_empty());
+        }
+        other => panic!("expected ReconnectResponse, got {other:?}"),
+    }
+
+    // Followed by a ParticipantUpdate (containing the resumed participant
+    // with the same sid) and a RoomUpdate.
+    let mut saw_update = false;
+    let mut saw_room_update = false;
+    for _ in 0..4 {
+        let resp = read_response(&mut ws2).await;
+        match resp.message {
+            Some(lk::signal_response::Message::Update(u)) => {
+                saw_update = true;
+                assert!(
+                    u.participants.iter().any(|p| p.sid == sid),
+                    "update must include the resumed participant"
+                );
+            }
+            Some(lk::signal_response::Message::RoomUpdate(_)) => saw_room_update = true,
+            Some(lk::signal_response::Message::Trickle(_)) => {}
+            other => panic!("unexpected frame during resume: {other:?}"),
+        }
+        if saw_update && saw_room_update {
+            break;
+        }
+    }
+    assert!(saw_update, "resume must send a ParticipantUpdate");
+    assert!(saw_room_update, "resume must send a RoomUpdate");
+
+    // The room has exactly one participant with the original sid.
+    let room = _server.get_room("reconnect-room").unwrap();
+    let parts = room.participants();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].sid, sid);
+
+    // The resumed session is functional: a ping gets a pong.
+    send_request(
+        &mut ws2,
+        &lk::SignalRequest {
+            message: Some(lk::signal_request::Message::PingReq(lk::Ping {
+                timestamp: lk_server::core::unix_micros() / 1000,
+                rtt: 0,
+            })),
+        },
+    )
+    .await;
+    let pong = await_message(&mut ws2, |r| {
+        matches!(r.message, Some(lk::signal_response::Message::PongResp(_)))
+    })
+    .await;
+    assert!(matches!(
+        pong.message,
+        Some(lk::signal_response::Message::PongResp(_))
+    ));
+    drop(ws2);
+}
+
+/// A reconnect for a participant that no longer exists falls back to a fresh
+/// join (JoinResponse), so the client always recovers.
+#[tokio::test]
+async fn reconnect_with_stale_sid_falls_back_to_join() {
+    let (_server, base) = start_server().await;
+    let token = join_token("stale", "stale-room");
+    let url = format!(
+        "{}/rtc?access_token={}&reconnect=1&sid=PA_deadbeef",
+        base.replace("http", "ws"),
+        token
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let join = expect_join(&mut ws).await;
+    assert_eq!(join.participant.as_ref().unwrap().identity, "stale");
+    drop(ws);
+}

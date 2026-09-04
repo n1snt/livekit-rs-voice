@@ -1,7 +1,7 @@
 //! Participant state and signaling outbound channel.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use lk_proto::livekit as lk;
@@ -50,6 +50,10 @@ pub struct Participant {
     state: AtomicU8,
     pub version: VersionCounter,
     pub disconnected_reason: AtomicI32,
+    /// Incremented each time the participant's signal session is resumed; the
+    /// teardown grace task for an older session skips when a newer session
+    /// resumed (see `signal::run_signal_session`).
+    pub resume_gen: AtomicU64,
     /// Outbound signal channel to the websocket writer.
     tx: Mutex<Option<mpsc::Sender<lk::SignalResponse>>>,
     /// Rooms this participant belongs to (single room for now).
@@ -83,6 +87,7 @@ impl Participant {
             state: AtomicU8::new(ParticipantState::Joining as u8),
             version: VersionCounter::default(),
             disconnected_reason: AtomicI32::new(0),
+            resume_gen: AtomicU64::new(0),
             tx: Mutex::new(None),
             room: Mutex::new(Weak::new()),
             tracks: Mutex::new(BTreeMap::new()),

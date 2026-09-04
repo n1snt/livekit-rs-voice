@@ -25,6 +25,11 @@ pub const AGENT_PROTOCOL: i32 = 1;
 pub const PING_INTERVAL_SECS: i32 = 5;
 pub const PING_TIMEOUT_SECS: i32 = 15;
 
+/// How long a participant stays in the room after their signal socket closes
+/// so a client reconnecting with the same identity can resume the session
+/// (the reference keeps the participant alive for a reconnect window).
+pub const RECONNECT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Session parameters extracted from the HTTP request / join request.
 /// Serialized (JSON) when relaying a join to another cluster node.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -570,11 +575,31 @@ pub async fn end_participant(participant: &Arc<Participant>, reason: lk::Disconn
 /// upgraded, before the reader loop starts.
 pub struct SignalPrelude {
     pub join: lk::SignalResponse,
+    /// Additional responses sent after the first frame (e.g. the participant
+    /// update + room update that follow a reconnect response).
+    pub post_join: Vec<lk::SignalResponse>,
     pub publisher_offer: Option<lk::SessionDescription>,
     pub add_tracks: Vec<lk::AddTrackRequest>,
     pub sync_state: Option<lk::SyncState>,
     /// Room-level agent dispatches added by this join (launch once).
     pub launch_agents: Vec<crate::auth::RoomAgentDispatch>,
+}
+
+impl Default for SignalPrelude {
+    fn default() -> Self {
+        SignalPrelude {
+            join: lk::SignalResponse {
+                message: Some(lk::signal_response::Message::Join(
+                    lk::JoinResponse::default(),
+                )),
+            },
+            post_join: Vec::new(),
+            publisher_offer: None,
+            add_tracks: Vec::new(),
+            sync_state: None,
+            launch_agents: Vec::new(),
+        }
+    }
 }
 
 /// The read half of a signaling transport. Implemented over a websocket
@@ -759,12 +784,14 @@ pub fn ws_io(socket: WebSocket, max_frame_size: usize) -> SignalIo {
 /// Runs the full signaling session over a `SignalIo`. Sends the
 /// `SignalPrelude` (join response, then any publisher offer answer / track
 /// acknowledgements), launches room-level agent jobs, negotiates the subscriber
-/// connection, and then loops over incoming requests.
+/// connection, and then loops over incoming requests. `resume` runs the same
+/// loop against an existing participant without rebuilding the media plane.
 pub async fn run_signal_session(
     io: SignalIo,
     participant: Arc<Participant>,
     room: Arc<Room>,
     prelude: SignalPrelude,
+    resume: bool,
 ) {
     let io = Arc::new(io);
     let (tx, mut rx) =
@@ -779,14 +806,20 @@ pub async fn run_signal_session(
             .inc();
     }
 
-    // Writer task: the join response is written first (so it is always the
-    // first frame the client receives), then the participant's outbound
-    // channel is drained.
+    // Writer task: the join/reconnect response is written first (so it is always
+    // the first frame the client receives), then any post-join frames, then the
+    // participant's outbound channel is drained.
     let writer_io = io.clone();
     let join = prelude.join.clone();
+    let post_join = prelude.post_join.clone();
     let sink_task = tokio::spawn(async move {
         if !writer_io.send(&join).await {
             return;
+        }
+        for resp in post_join {
+            if !writer_io.send(&resp).await {
+                return;
+            }
         }
         while let Some(resp) = rx.recv().await {
             if !writer_io.send(&resp).await {
@@ -796,33 +829,36 @@ pub async fn run_signal_session(
     });
 
     // 1. Post-join responses. Tracks are registered before the publisher offer
-    //    so incoming RTP can be matched to them.
-    for at in prelude.add_tracks {
-        handle_participant_request(
-            &participant,
-            lk::SignalRequest {
-                message: Some(lk::signal_request::Message::AddTrack(at)),
-            },
-        )
-        .await;
-    }
-    if let Some(offer) = &prelude.publisher_offer {
-        handle_participant_request(
-            &participant,
-            lk::SignalRequest {
-                message: Some(lk::signal_request::Message::Offer(offer.clone())),
-            },
-        )
-        .await;
-    }
-    if let Some(state) = &prelude.sync_state {
-        handle_participant_request(
-            &participant,
-            lk::SignalRequest {
-                message: Some(lk::signal_request::Message::SyncState(state.clone())),
-            },
-        )
-        .await;
+    //    so incoming RTP can be matched to them. Skipped on resume: the
+    //    publisher offer / track state is still live on the media plane.
+    if !resume {
+        for at in prelude.add_tracks {
+            handle_participant_request(
+                &participant,
+                lk::SignalRequest {
+                    message: Some(lk::signal_request::Message::AddTrack(at)),
+                },
+            )
+            .await;
+        }
+        if let Some(offer) = &prelude.publisher_offer {
+            handle_participant_request(
+                &participant,
+                lk::SignalRequest {
+                    message: Some(lk::signal_request::Message::Offer(offer.clone())),
+                },
+            )
+            .await;
+        }
+        if let Some(state) = &prelude.sync_state {
+            handle_participant_request(
+                &participant,
+                lk::SignalRequest {
+                    message: Some(lk::signal_request::Message::SyncState(state.clone())),
+                },
+            )
+            .await;
+        }
     }
 
     // 2. Launch room-level agent dispatches added by this join (once each).
@@ -848,23 +884,26 @@ pub async fn run_signal_session(
     }
 
     // 3. Create the subscriber PC, subscribe to already-published tracks, and
-    //    negotiate (data channels + subscriptions).
-    if let Err(e) = media::setup_subscriber(&participant).await {
-        tracing::warn!(sid = %participant.sid, "setup subscriber: {e}");
-    }
-    let existing: Vec<(Arc<Participant>, Arc<crate::track::PublishedTrack>)> = room
-        .participants()
-        .into_iter()
-        .filter(|p| p.sid != participant.sid && participant.can_subscribe())
-        .flat_map(|p| p.tracks().into_iter().map(move |t| (p.clone(), t)))
-        .collect();
-    tracing::debug!(sid = %participant.sid, existing = existing.len(), "subscribe existing tracks");
-    for (publisher, track) in existing {
-        if let Err(e) = media::add_subscription(&participant, &track, &publisher).await {
-            tracing::debug!(sid = %participant.sid, track = %track.sid, "subscribe existing: {e}");
+    //    negotiate (data channels + subscriptions). Skipped on resume (the
+    //    subscriber connection is still live).
+    if !resume {
+        if media::setup_subscriber(&participant).await.is_err() {
+            tracing::warn!(sid = %participant.sid, "setup subscriber failed");
         }
+        let existing: Vec<(Arc<Participant>, Arc<crate::track::PublishedTrack>)> = room
+            .participants()
+            .into_iter()
+            .filter(|p| p.sid != participant.sid && participant.can_subscribe())
+            .flat_map(|p| p.tracks().into_iter().map(move |t| (p.clone(), t)))
+            .collect();
+        tracing::debug!(sid = %participant.sid, existing = existing.len(), "subscribe existing tracks");
+        for (publisher, track) in existing {
+            if let Err(e) = media::add_subscription(&participant, &track, &publisher).await {
+                tracing::debug!(sid = %participant.sid, track = %track.sid, "subscribe existing: {e}");
+            }
+        }
+        media::request_subscriber_negotiation(&participant);
     }
-    media::request_subscriber_negotiation(&participant);
 
     // 4. Reader loop. The transport enforces its own deadline (websocket) or
     //    blocks until closed (relay); both surface as `None`.
@@ -875,10 +914,21 @@ pub async fn run_signal_session(
         }
     }
 
-    // Signal the transport we are done, then terminate the participant.
+    // Signal the transport we are done, then terminate the participant — after
+    // a grace period so a client reconnecting with the same identity can
+    // resume the session (reference: the participant survives the signal
+    // close for a reconnect window).
     io.close().await;
     if participant.state() != ParticipantState::Disconnected {
-        end_participant(&participant, lk::DisconnectReason::SignalClose).await;
+        let p = participant.clone();
+        let gen = p.resume_gen.load(std::sync::atomic::Ordering::Relaxed);
+        tokio::spawn(async move {
+            tokio::time::sleep(RECONNECT_GRACE).await;
+            // A newer session resumed this participant; leave it alone.
+            if p.resume_gen.load(std::sync::atomic::Ordering::Relaxed) == gen {
+                end_participant(&p, lk::DisconnectReason::SignalClose).await;
+            }
+        });
     }
     if let Some(ctx) = room.context() {
         ctx.metrics
@@ -899,6 +949,46 @@ pub async fn run_session_with_io(
     kind: ParticipantKind,
 ) -> Result<(), String> {
     let room_name = token.video.room.clone();
+
+    // A reconnect (reconnect=true + matching identity/sid) resumes the
+    // existing participant and its live media plane instead of re-joining.
+    if params.reconnect {
+        if let Some((room, participant)) = resume_room_participant(server, &token, &params) {
+            // Follow the reconnect response with a full ParticipantUpdate +
+            // RoomUpdate so the client re-syncs state (reference resume).
+            let updates: Vec<lk::ParticipantInfo> = room
+                .participants()
+                .into_iter()
+                .map(|p| p.to_proto())
+                .collect();
+            let reconnect = build_reconnect_response(server, &participant);
+            let prelude = SignalPrelude {
+                join: lk::SignalResponse {
+                    message: Some(lk::signal_response::Message::Reconnect(reconnect)),
+                },
+                post_join: vec![
+                    lk::SignalResponse {
+                        message: Some(lk::signal_response::Message::Update(
+                            lk::ParticipantUpdate {
+                                participants: updates,
+                            },
+                        )),
+                    },
+                    lk::SignalResponse {
+                        message: Some(lk::signal_response::Message::RoomUpdate(lk::RoomUpdate {
+                            room: Some(room.to_proto()),
+                        })),
+                    },
+                ],
+                ..Default::default()
+            };
+            run_signal_session(io, participant, room, prelude, true).await;
+            return Ok(());
+        }
+        tracing::debug!(room = %room_name, identity = %token.identity,
+            "reconnect could not resume; falling back to a fresh join");
+    }
+
     let (room, participant, launch_agents) = match join_room(server, &token, &params, kind).await {
         Ok(x) => x,
         Err(e) => {
@@ -916,13 +1006,68 @@ pub async fn run_session_with_io(
         join: lk::SignalResponse {
             message: Some(lk::signal_response::Message::Join(join_response)),
         },
+        post_join: Vec::new(),
         publisher_offer: params.publisher_offer.clone(),
         add_tracks: params.add_track_requests.clone(),
         sync_state: params.sync_state.clone(),
         launch_agents,
     };
-    run_signal_session(io, participant, room, prelude).await;
+    run_signal_session(io, participant, room, prelude, false).await;
     Ok(())
+}
+
+/// Finds a live participant for a reconnect and marks the session as resumed.
+/// Returns `None` when the participant is gone (falls back to a fresh join).
+fn resume_room_participant(
+    server: &Arc<Server>,
+    token: &auth::VerifiedToken,
+    params: &SessionParams,
+) -> Option<(Arc<Room>, Arc<Participant>)> {
+    let room = server.get_room(&token.video.room)?;
+    let participant = room.get_participant_by_identity(&token.identity)?;
+    if participant.state() == ParticipantState::Disconnected {
+        return None;
+    }
+    // The client names the sid it had; a mismatch means a stale reconnect.
+    if !params.participant_sid.is_empty() && participant.sid != params.participant_sid {
+        return None;
+    }
+    participant
+        .resume_gen
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some((room, participant))
+}
+
+/// The `ReconnectResponse` sent when a session resumes (reference shape:
+/// ice servers, server info, and the last reliable message sequence).
+fn build_reconnect_response(
+    server: &Arc<Server>,
+    participant: &Arc<Participant>,
+) -> lk::ReconnectResponse {
+    lk::ReconnectResponse {
+        ice_servers: crate::turn::ice_servers(
+            &server.config,
+            &server.keys.as_map(),
+            &participant.sid,
+        ),
+        client_configuration: None,
+        server_info: Some(server_info(server)),
+        last_message_seq: 0,
+    }
+}
+
+/// The `ServerInfo` broadcast in join/reconnect responses and worker
+/// registrations.
+pub fn server_info(server: &Arc<Server>) -> lk::ServerInfo {
+    lk::ServerInfo {
+        edition: lk::server_info::Edition::Standard as i32,
+        version: SERVER_VERSION.to_string(),
+        protocol: PROTOCOL_VERSION,
+        region: server.config.region.clone(),
+        node_id: server.node_id.clone(),
+        agent_protocol: AGENT_PROTOCOL,
+        ..Default::default()
+    }
 }
 
 /// Closes the signal connection (used by RoomService.RemoveParticipant and
