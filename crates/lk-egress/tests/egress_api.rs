@@ -508,6 +508,34 @@ async fn start_returns_wire_compatible_egress_info() {
     let _ = std::fs::remove_dir_all(&out_dir);
 }
 
+/// Creates a room through the Twirp API and returns its sid.
+async fn create_room(base: &str, name: &str) -> String {
+    let now = lk_server::core::unix_seconds();
+    let payload = serde_json::json!({
+        "iss": API_KEY, "sub": "admin", "iat": now, "nbf": now - 5, "exp": now + 3600,
+        "video": {"roomCreate": true}
+    });
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.typ = Some("JWT".to_string());
+    let token = jsonwebtoken::encode(
+        &header,
+        &payload,
+        &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .unwrap();
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/twirp/livekit.RoomService/CreateRoom"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(format!(r#"{{"name":"{name}"}}"#))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let room: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    room["sid"].as_str().unwrap().to_string()
+}
+
 /// `ListEgress` filters by room name and egress id, and returns a paginated
 /// `nextPageToken` (empty when there are no more pages).
 #[tokio::test]
@@ -521,6 +549,8 @@ async fn list_egress_filters_and_roundtrips() {
     std::fs::create_dir_all(&out_dir).unwrap();
     let (server, base) = start_stack(&out_dir).await;
     let _ = server;
+    create_room(&base, "list-room-a").await;
+    create_room(&base, "list-room-b").await;
 
     let (status, a) = start_room_composite(&base, "list-room-a").await;
     assert_eq!(status, 200, "{a}");
@@ -991,6 +1021,7 @@ async fn list_egress_active_filter() {
     std::fs::create_dir_all(&out_dir).unwrap();
     let (server, base) = start_stack(&out_dir).await;
     let _ = server;
+    create_room(&base, "active-room").await;
 
     let (status, a) = start_room_composite(&base, "active-room").await;
     assert_eq!(status, 200, "{a}");
@@ -1126,4 +1157,36 @@ async fn recorder_joins_as_hidden_egress_participant() {
     drop(pub_ws);
     drop(server);
     let _ = std::fs::remove_dir_all(&out_dir);
+}
+
+/// Starting an egress for a room that does not exist is `not_found` (the
+/// reference `egressLauncher.StartEgress` loads the room from the store).
+#[tokio::test]
+async fn start_missing_room_is_not_found() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    let out_dir = std::env::temp_dir().join(format!("lk_egress_noroom_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let (server, base) = start_stack(&out_dir).await;
+    let _ = server;
+
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{base}/twirp/livekit.Egress/StartRoomCompositeEgress"
+        ))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", record_token()))
+        .body(
+            r#"{"roomName":"no-such-room","audioOnly":true,"fileOutputs":[{"fileType":0,"filepath":"/r"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "{}", resp.text().await.unwrap());
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["code"], "not_found");
+    assert_eq!(body["msg"], "requested room does not exist");
 }

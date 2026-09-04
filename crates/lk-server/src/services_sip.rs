@@ -887,13 +887,18 @@ async fn start_egress(
     request: lk_proto::rpc::start_egress_request::Request,
 ) -> Result<lk::EgressInfo, TwirpError> {
     let egress_id = crate::core::generate_id("EG_");
-    // Resolve the room id when the room exists (the reference
-    // `egressLauncher.StartEgress` loads the room and stamps `RoomId` onto the
-    // request, which the recorder echoes back in `EgressInfo.room_id`).
-    let room_id = server
-        .get_room(room_name)
-        .map(|r| r.sid.clone())
-        .unwrap_or_default();
+    // Reference parity: `egressLauncher.StartEgress` loads the room (when a
+    // room name is given) and fails with not_found if it does not exist.
+    // The room id is then stamped onto the request and echoed back by the
+    // recorder in `EgressInfo.room_id`.
+    let room_id = if room_name.is_empty() {
+        String::new()
+    } else {
+        let room = server
+            .get_room(room_name)
+            .ok_or_else(|| TwirpError::not_found("requested room does not exist"))?;
+        room.sid.clone()
+    };
     let ireq = lk_proto::rpc::StartEgressRequest {
         egress_id: egress_id.clone(),
         room_id: room_id.clone(),
