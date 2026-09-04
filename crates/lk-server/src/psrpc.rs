@@ -88,6 +88,23 @@ impl SipInternalClient {
             .map_err(PsrpcError::Malformed)
     }
 
+    /// Like `create_sip_participant` but with a caller-chosen request timeout
+    /// (the reference uses 80s when `wait_until_answered` is set — the SIP
+    /// bridge waits for the far end to answer before responding).
+    pub async fn create_sip_participant_with_timeout(
+        &self,
+        req: &rpc::InternalCreateSipParticipantRequest,
+        timeout: Duration,
+    ) -> Result<rpc::InternalCreateSipParticipantResponse, PsrpcError> {
+        let payload = req.encode_to_vec();
+        let raw = self
+            .inner
+            .request_single("CreateSIPParticipant", "", payload, timeout)
+            .await?;
+        rpc::InternalCreateSipParticipantResponse::decode(raw.as_slice())
+            .map_err(PsrpcError::Malformed)
+    }
+
     pub async fn transfer_sip_participant(
         &self,
         sip_call_id: &str,

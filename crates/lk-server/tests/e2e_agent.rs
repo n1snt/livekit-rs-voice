@@ -95,6 +95,7 @@ fn register_worker_request(agent_name: &str) -> lk::WorkerMessage {
                     can_publish: true,
                     can_subscribe: true,
                     can_publish_data: true,
+                    #[allow(deprecated)]
                     agent: true,
                     ..Default::default()
                 }),
@@ -190,7 +191,10 @@ async fn dispatch_assigns_job_and_agent_joins() {
 
     // The server asks the worker for availability.
     let availability = read_until(&mut ws, |m| {
-        matches!(m.message, Some(lk::server_message::Message::Availability(_)))
+        matches!(
+            m.message,
+            Some(lk::server_message::Message::Availability(_))
+        )
     })
     .await;
     let job = match availability.message {
@@ -200,7 +204,10 @@ async fn dispatch_assigns_job_and_agent_joins() {
     assert_eq!(job.agent_name, "voice-agent");
     assert_eq!(job.room.as_ref().unwrap().name, "agent-job-room");
     assert_eq!(job.dispatch_id, dispatch_id);
-    assert_eq!(job.state.as_ref().unwrap().status, lk::JobStatus::JsPending as i32);
+    assert_eq!(
+        job.state.as_ref().unwrap().status,
+        lk::JobStatus::JsPending as i32
+    );
 
     // Accept the job, asking for a specific agent identity.
     send_worker_msg(
@@ -331,7 +338,10 @@ async fn declined_availability_is_not_assigned() {
     assert_eq!(status, reqwest::StatusCode::OK);
 
     let availability = read_until(&mut ws, |m| {
-        matches!(m.message, Some(lk::server_message::Message::Availability(_)))
+        matches!(
+            m.message,
+            Some(lk::server_message::Message::Availability(_))
+        )
     })
     .await;
     let job_id = match availability.message {
@@ -371,13 +381,12 @@ async fn worker_requires_agent_grant() {
     let mut request =
         tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
             .unwrap();
-    request.headers_mut().insert(
-        "Authorization",
-        format!("Bearer {token}").parse().unwrap(),
-    );
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     let resp = tokio_tungstenite::connect_async(request).await;
     // The server rejects the upgrade with 401.
-    let err = resp.err().expect("connection must be rejected");
+    let err = resp.expect_err("connection must be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("401") || msg.contains("permission"),

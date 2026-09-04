@@ -428,7 +428,6 @@ async fn stop_egress(base: &str, egress_id: &str) -> (reqwest::StatusCode, serde
 /// A recorder identity is `egress_{egress_id}` on this implementation; the
 /// Go egress uses the bare egress id. The tests below deliberately avoid
 /// asserting on the recorder identity so the identity scheme can change.
-
 /// The `EgressInfo` returned by `StartRoomCompositeEgress` must match the Go
 /// wire shape: egress id prefix `EG_`, the resolved room id, nanosecond
 /// timestamps, `EGRESS_SOURCE_TYPE_SDK` for the SDK room-composite path, and
@@ -474,9 +473,15 @@ async fn start_returns_wire_compatible_egress_info() {
     // Decode over the protobuf content type (what the SDKs send), so the wire
     // contract — including the EGRESS_STARTING (0) enum — is observable.
     let info = start_room_composite_pb(&base, "eg-api-room").await;
-    assert!(info.egress_id.starts_with("EG_"), "egress id must use the EG_ prefix");
+    assert!(
+        info.egress_id.starts_with("EG_"),
+        "egress id must use the EG_ prefix"
+    );
     assert_eq!(info.room_name, "eg-api-room");
-    assert_eq!(info.room_id, room_sid, "room id must be resolved from the room");
+    assert_eq!(
+        info.room_id, room_sid,
+        "room id must be resolved from the room"
+    );
     assert_eq!(info.status, lk::EgressStatus::EgressStarting as i32);
     assert_eq!(info.source_type, lk::EgressSourceType::Sdk as i32);
 
@@ -787,8 +792,7 @@ async fn egress_reports_started_and_ended_webhooks() {
     let io = IoClient::new(bus.clone()).await.unwrap();
     let _egress = EgressServer::new(bus, conf, io).await.unwrap();
 
-    let (pub_ws, _pc, out_track) =
-        connect_publisher(&base, "wh-pub", "wh-room", "mic1").await;
+    let (pub_ws, _pc, out_track) = connect_publisher(&base, "wh-pub", "wh-room", "mic1").await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     let stream = tokio::spawn(stream_audio(out_track.clone(), 4, 0x44444444, 1));
 
@@ -918,7 +922,7 @@ async fn v2_start_egress_with_media_source() {
             assert_eq!(r.room_name, "v2-room");
             match &r.source {
                 Some(lk::start_egress_request::Source::Media(m)) => {
-                    assert_eq!(m.audio.as_ref().unwrap().capture_all, true);
+                    assert!(m.audio.as_ref().unwrap().capture_all);
                 }
                 other => panic!("expected media source, got {other:?}"),
             }
@@ -1001,11 +1005,7 @@ async fn list_egress_active_filter() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let all = list_egress(
-            &base,
-            serde_json::json!({"roomName": "active-room"}),
-        )
-        .await;
+        let all = list_egress(&base, serde_json::json!({"roomName": "active-room"})).await;
         let items = all["items"].as_array().unwrap();
         let complete = items
             .iter()
@@ -1028,7 +1028,11 @@ async fn list_egress_active_filter() {
     )
     .await;
     let items = active["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "only the running egress is active: {active}");
+    assert_eq!(
+        items.len(),
+        1,
+        "only the running egress is active: {active}"
+    );
     assert_eq!(items[0]["egressId"], b["egressId"]);
 }
 
@@ -1103,19 +1107,18 @@ async fn recorder_joins_as_hidden_egress_participant() {
 
     // The recorder is NOT announced to the existing publisher: no
     // ParticipantUpdate mentioning the recorder arrives on the publisher's ws.
-    let hidden = tokio::time::timeout(std::time::Duration::from_secs(2), read_response(&mut pub_ws))
-        .await;
-    match hidden {
-        Ok(resp) => match resp.message {
-            Some(lk::signal_response::Message::Update(u)) => {
-                assert!(
-                    !u.participants.iter().any(|p| p.identity == egress_id),
-                    "hidden recorder must not be announced"
-                );
-            }
-            _ => {}
-        },
-        Err(_) => {}
+    if let Ok(resp) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_response(&mut pub_ws),
+    )
+    .await
+    {
+        if let Some(lk::signal_response::Message::Update(u)) = resp.message {
+            assert!(
+                !u.participants.iter().any(|p| p.identity == egress_id),
+                "hidden recorder must not be announced"
+            );
+        }
     }
 
     let (status, _) = stop_egress(&base, &egress_id).await;

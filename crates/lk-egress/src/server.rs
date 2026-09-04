@@ -457,8 +457,7 @@ impl IoHandler for Handlers {
         tracing::debug!(method, len = raw.len(), "psrpc request");
         match method {
             "StartEgress" => {
-                let req = rpc::StartEgressRequest::decode(raw.as_slice())
-                    ?;
+                let req = rpc::StartEgressRequest::decode(raw.as_slice())?;
                 let egress_id = req.egress_id.clone();
                 if egress_id.is_empty() {
                     return Err(RpcError::invalid_argument("egress_id is required"));
@@ -471,9 +470,8 @@ impl IoHandler for Handlers {
                 if room.is_empty() {
                     return Err(RpcError::invalid_argument("room_name is required"));
                 }
-                let request = request_info(&req).ok_or_else(|| {
-                    RpcError::invalid_argument("unsupported egress request")
-                })?;
+                let request = request_info(&req)
+                    .ok_or_else(|| RpcError::invalid_argument("unsupported egress request"))?;
                 if !admitted(&self.conf, self.active.lock().unwrap().len()) {
                     return Err(RpcError::unavailable(format!(
                         "egress node at capacity ({} active, cpu_cost admission)",
@@ -576,7 +574,9 @@ impl IoHandler for Handlers {
                 let ids: Vec<String> = self.active.lock().unwrap().iter().cloned().collect();
                 Ok(rpc::ListActiveEgressResponse { egress_ids: ids }.encode_to_vec())
             }
-            _ => Err(RpcError::internal(format!("unknown egress method: {method}"))),
+            _ => Err(RpcError::internal(format!(
+                "unknown egress method: {method}"
+            ))),
         }
     }
 }

@@ -17,7 +17,10 @@ fn redact(s: &str, placeholder: &str) -> String {
 /// Replaces the stream key in an RTMP/SRT URL with a short identifier
 /// (`{aaa...bbb}`), mirroring `utils.RedactStreamKey`.
 fn redact_stream_key(url: &str) -> (String, bool) {
-    let Some(rest) = url.strip_prefix("rtmp://").or_else(|| url.strip_prefix("rtmps://")) else {
+    let Some(rest) = url
+        .strip_prefix("rtmp://")
+        .or_else(|| url.strip_prefix("rtmps://"))
+    else {
         return (url.to_string(), false);
     };
     // rtmp://host/app/streamkey [ live=1]

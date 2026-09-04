@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use lk_proto::livekit as lk;
 
@@ -393,10 +394,20 @@ pub async fn sip_service(
                 .sip_client()
                 .await
                 .map_err(TwirpError::failed_precondition)?;
-            let resp = client
-                .create_sip_participant(&ireq)
-                .await
-                .map_err(psrpc_to_twirp)?;
+            // The reference waits 80s (not 30s) when the caller asked to wait
+            // until the far end answers — a slow SIP provider must not make
+            // the API call time out.
+            let resp = if r.wait_until_answered {
+                client
+                    .create_sip_participant_with_timeout(&ireq, Duration::from_secs(80))
+                    .await
+                    .map_err(psrpc_to_twirp)?
+            } else {
+                client
+                    .create_sip_participant(&ireq)
+                    .await
+                    .map_err(psrpc_to_twirp)?
+            };
             out(
                 &lk::SipParticipantInfo {
                     participant_id: resp.participant_id,
@@ -500,9 +511,7 @@ const ATTR_SIP_CALL_ID: &str = "sip.callID";
 /// onto Twirp codes, e.g. `invalid_argument`, `not_found`, `unavailable`).
 fn psrpc_to_twirp(e: crate::psrpc::PsrpcError) -> TwirpError {
     match e {
-        crate::psrpc::PsrpcError::Timeout => {
-            TwirpError::deadline_exceeded("request timed out")
-        }
+        crate::psrpc::PsrpcError::Timeout => TwirpError::deadline_exceeded("request timed out"),
         crate::psrpc::PsrpcError::Rpc { code, message } => match code.as_str() {
             "invalid_argument" => TwirpError::invalid_argument(message),
             "not_found" => TwirpError::not_found(message),
@@ -833,7 +842,10 @@ pub async fn egress_service(
             // terminal" from the store before waiting on a psrpc selection
             // timeout, so a stray StopEgress fails fast with the same error
             // the reference server returns.
-            let stored = store.load_egress(&r.egress_id).await.map_err(twirp_internal)?;
+            let stored = store
+                .load_egress(&r.egress_id)
+                .await
+                .map_err(twirp_internal)?;
             if let Some(info) = &stored {
                 if !matches!(
                     lk::EgressStatus::try_from(info.status),

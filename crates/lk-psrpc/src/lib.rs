@@ -1011,4 +1011,46 @@ mod tests {
             .expect("psrpc round-trip over Redis should complete");
         assert!(internal::Request::decode(resp.as_slice()).is_ok());
     }
+
+    struct TaggedHandler(Arc<Mutex<Vec<&'static str>>>, &'static str);
+
+    #[async_trait::async_trait]
+    impl IoHandler for TaggedHandler {
+        async fn handle(&self, _method: &str, raw: Vec<u8>) -> Result<Vec<u8>, RpcError> {
+            self.0.lock().unwrap().push(self.1);
+            Ok(raw)
+        }
+    }
+
+    /// When two servers bid on the same request, the client grants exactly one
+    /// claim so only one handler runs (else every egress node would start the
+    /// same recording).
+    #[tokio::test]
+    async fn client_grants_single_claim() {
+        let bus = MemoryBus::new();
+        let hits: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let a = PsrpcServer::new(bus.clone(), "EgressInternal")
+            .await
+            .unwrap();
+        let b = PsrpcServer::new(bus.clone(), "EgressInternal")
+            .await
+            .unwrap();
+        a.register("StartEgress", Arc::new(TaggedHandler(hits.clone(), "A")))
+            .await
+            .unwrap();
+        b.register("StartEgress", Arc::new(TaggedHandler(hits.clone(), "B")))
+            .await
+            .unwrap();
+
+        let client = PsrpcClient::new(bus, "EgressInternal").await.unwrap();
+        let req = internal::Request {
+            request_id: "REQ_multi".to_string(),
+            ..Default::default()
+        };
+        let resp = client.request("StartEgress", "", &req).await.unwrap();
+        assert!(internal::Request::decode(resp.as_slice()).is_ok());
+
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1, "exactly one server must handle the request");
+    }
 }

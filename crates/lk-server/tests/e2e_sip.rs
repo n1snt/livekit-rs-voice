@@ -101,7 +101,8 @@ fn spawn_transfer_bridge(
     let topic = sip_call_id.to_string();
     tokio::spawn(async move {
         let rpc_ch = psrpc::rpc_channel("SIPInternal", "TransferSIPParticipant", &topic);
-        let rclaim_ch = psrpc::claim_response_channel("SIPInternal", "TransferSIPParticipant", &topic);
+        let rclaim_ch =
+            psrpc::claim_response_channel("SIPInternal", "TransferSIPParticipant", &topic);
         let mut stream = bus2
             .subscribe(vec![rpc_ch.clone(), rclaim_ch.clone()])
             .await
@@ -209,8 +210,8 @@ async fn transfer_bridges_to_sip_container() {
     // The bridge received exactly one well-formed request on the per-call topic.
     let got = received.lock().await.clone();
     assert_eq!(got.len(), 1, "transfer request must reach the bridge once");
-    let ireq = lk_proto::rpc::InternalTransferSipParticipantRequest::decode(got[0].as_slice())
-        .unwrap();
+    let ireq =
+        lk_proto::rpc::InternalTransferSipParticipantRequest::decode(got[0].as_slice()).unwrap();
     assert_eq!(ireq.sip_call_id, "SC_transfer1");
     assert_eq!(ireq.transfer_to, "sip:+1999@example.com");
     assert!(!ireq.play_dialtone);

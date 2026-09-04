@@ -175,6 +175,7 @@ fn append_bytes(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// non-deprecated `file_results` and the legacy `result` oneof (clients read
 /// `file_results`, matching the reference). `filename` is the storage key and
 /// `location` the uploaded URL (or local path when not uploaded).
+#[allow(clippy::too_many_arguments)]
 pub fn finished_info(
     egress_id: &str,
     room_id: &str,
