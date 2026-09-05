@@ -185,12 +185,7 @@ fn ip_filter_match(configured: &str, ip: &std::net::IpAddr) -> bool {
 
 fn ipv6_is_ipv4_mapped(v6: &std::net::Ipv6Addr) -> bool {
     let seg = v6.segments();
-    seg[0] == 0
-        && seg[1] == 0
-        && seg[2] == 0
-        && seg[3] == 0
-        && seg[4] == 0
-        && seg[5] == 0xffff
+    seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff
 }
 
 impl Default for RtcEngine {
@@ -1411,7 +1406,10 @@ mod tests {
         // IPv6 CIDRs work too.
         let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
         assert!(ip_filter_match("2001:db8::/32", &v6));
-        assert!(!ip_filter_match("2001:db8::/32", &"2001:db9::1".parse().unwrap()));
+        assert!(!ip_filter_match(
+            "2001:db8::/32",
+            &"2001:db9::1".parse().unwrap()
+        ));
         // Garbage entries never match (and never panic).
         assert!(!ip_filter_match("not-an-ip", &v4("10.0.0.0")));
     }
