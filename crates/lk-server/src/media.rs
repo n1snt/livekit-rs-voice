@@ -122,13 +122,12 @@ impl RtcEngine {
             let includes = ips.includes.clone();
             let excludes = ips.excludes.clone();
             setting.set_ip_filter(Box::new(move |ip: std::net::IpAddr| {
-                let ip = ip.to_string();
                 let keep = if includes.is_empty() {
                     true
                 } else {
-                    includes.iter().any(|i| ip.starts_with(i))
+                    includes.iter().any(|i| ip_filter_match(i, &ip))
                 };
-                keep && !excludes.iter().any(|e| ip.starts_with(e))
+                keep && !excludes.iter().any(|e| ip_filter_match(e, &ip))
             }));
         }
 
@@ -154,6 +153,44 @@ impl RtcEngine {
             .map(Arc::new)
             .map_err(|e| format!("create peer connection: {e}"))
     }
+}
+
+/// Matches a candidate IP against a configured `rtc.ips.includes` /
+/// `rtc.ips.excludes` entry: a CIDR mask (`10.0.0.0/16`, `192.168.1.0/32`) or
+/// an exact IP when no mask is given. IPv4-mapped IPv6 candidates are
+/// normalized so a `10.0.0.0/8` include matches `::ffff:10.0.0.1`.
+fn ip_filter_match(configured: &str, ip: &std::net::IpAddr) -> bool {
+    // Normalize IPv4-mapped IPv6 (`::ffff:a.b.c.d`) to IPv4 so IPv4 CIDRs
+    // match dual-stack candidates.
+    let ip = match ip {
+        std::net::IpAddr::V6(v6) if ipv6_is_ipv4_mapped(v6) => {
+            let seg = v6.segments();
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                (seg[6] >> 8) as u8,
+                seg[6] as u8,
+                (seg[7] >> 8) as u8,
+                seg[7] as u8,
+            ))
+        }
+        other => *other,
+    };
+    if let Ok(net) = configured.parse::<ipnet::IpNet>() {
+        return net.contains(&ip);
+    }
+    configured
+        .parse::<std::net::IpAddr>()
+        .map(|a| a == ip)
+        .unwrap_or(false)
+}
+
+fn ipv6_is_ipv4_mapped(v6: &std::net::Ipv6Addr) -> bool {
+    let seg = v6.segments();
+    seg[0] == 0
+        && seg[1] == 0
+        && seg[2] == 0
+        && seg[3] == 0
+        && seg[4] == 0
+        && seg[5] == 0xffff
 }
 
 impl Default for RtcEngine {
@@ -1351,6 +1388,33 @@ pub fn active_speakers(participants: &[Arc<Participant>]) -> Vec<lk::SpeakerInfo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ip_filter_matches_cidrs_and_exact_ips() {
+        let v4 = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        // CIDR /8 matches hosts inside the block but not outside.
+        assert!(ip_filter_match("10.0.0.0/8", &v4("10.1.2.3")));
+        assert!(!ip_filter_match("10.0.0.0/8", &v4("11.1.2.3")));
+        // /32 is an exact single host (the reference example 192.168.1.0/24
+        // also comes from the documented config).
+        assert!(ip_filter_match("10.0.0.0/32", &v4("10.0.0.0")));
+        assert!(!ip_filter_match("10.0.0.0/32", &v4("10.0.0.1")));
+        assert!(ip_filter_match("192.168.1.0/24", &v4("192.168.1.55")));
+        assert!(!ip_filter_match("192.168.1.0/24", &v4("192.168.2.55")));
+        // A bare IP without a mask matches only that exact address.
+        assert!(ip_filter_match("216.48.182.132", &v4("216.48.182.132")));
+        assert!(!ip_filter_match("216.48.182.132", &v4("216.48.182.133")));
+        // IPv4-mapped IPv6 candidates are matched by IPv4 CIDRs.
+        let mapped: std::net::IpAddr = "::ffff:10.9.8.7".parse().unwrap();
+        assert!(ip_filter_match("10.0.0.0/8", &mapped));
+        assert!(!ip_filter_match("192.168.1.0/24", &mapped));
+        // IPv6 CIDRs work too.
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(ip_filter_match("2001:db8::/32", &v6));
+        assert!(!ip_filter_match("2001:db8::/32", &"2001:db9::1".parse().unwrap()));
+        // Garbage entries never match (and never panic).
+        assert!(!ip_filter_match("not-an-ip", &v4("10.0.0.0")));
+    }
 
     #[test]
     fn quality_score_maps_loss_and_jitter() {

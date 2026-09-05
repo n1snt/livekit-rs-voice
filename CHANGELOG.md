@@ -13,6 +13,12 @@ The fourth component, `R`, is our own build/patch revision for changes that do n
 
 The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision. See [docs/versioning.md](docs/versioning.md) for the full policy.
 
+## [Unreleased]
+
+### Fixed
+
+- `rtc.ips.includes` / `rtc.ips.excludes` now parse their entries as CIDR masks (`10.0.0.0/16`, `192.168.1.0/24`) or exact IPs instead of matching candidate IPs by string prefix. A `/16` (or `/32`) mask previously never matched anything but its own prefix, so the documented candidate filter silently allowed/disallowed the wrong addresses. IPv4-mapped IPv6 candidates are matched by the IPv4 CIDRs.
+
 ## [1.13.5.3] - 2026-09-05
 
 ### Changed
