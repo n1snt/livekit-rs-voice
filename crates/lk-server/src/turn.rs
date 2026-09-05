@@ -189,20 +189,24 @@ fn external_ip(config: &Config) -> std::net::IpAddr {
             return ip;
         }
     }
-    for cidr in &config.rtc.ips.includes {
-        if let Some((ip, _)) = cidr.split_once('/') {
-            if let Ok(ip) = ip.parse::<std::net::IpAddr>() {
-                if !ip.is_private() {
-                    return ip;
-                }
+    // Accept both bare IPs ("216.48.182.132") and CIDR entries
+    // ("216.48.182.132/32").
+    let includes: Vec<&String> = config.rtc.ips.includes.iter().collect();
+    let ip_from = |s: &String| -> Option<std::net::IpAddr> {
+        s.parse::<std::net::IpAddr>()
+            .ok()
+            .or_else(|| s.split_once('/').and_then(|(ip, _)| ip.parse().ok()))
+    };
+    for entry in &includes {
+        if let Some(ip) = ip_from(entry) {
+            if !ip.is_private() {
+                return ip;
             }
         }
     }
-    for cidr in &config.rtc.ips.includes {
-        if let Some((ip, _)) = cidr.split_once('/') {
-            if let Ok(ip) = ip.parse() {
-                return ip;
-            }
+    for entry in &includes {
+        if let Some(ip) = ip_from(entry) {
+            return ip;
         }
     }
     std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
@@ -299,6 +303,33 @@ pub fn ice_servers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_ip_accepts_bare_ips_and_cidrs() {
+        let mut cfg = Config::default();
+        cfg.rtc.ips.includes = vec!["10.0.0.5".to_string(), "216.48.182.132/32".to_string()];
+        assert_eq!(
+            external_ip(&cfg),
+            "216.48.182.132".parse::<std::net::IpAddr>().unwrap()
+        );
+        cfg.rtc.ips.includes = vec!["10.0.0.5".to_string(), "10.18.90.6".to_string()];
+        // All-private lists fall back to the first parseable entry (original
+        // behavior); a lone private IP still resolves to itself.
+        assert_eq!(
+            external_ip(&cfg),
+            "10.0.0.5".parse::<std::net::IpAddr>().unwrap()
+        );
+        cfg.rtc.ips.includes = vec!["10.18.90.6".to_string()];
+        assert_eq!(
+            external_ip(&cfg),
+            "10.18.90.6".parse::<std::net::IpAddr>().unwrap()
+        );
+        cfg.rtc.ips.includes.clear();
+        assert_eq!(
+            external_ip(&cfg),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
 
     #[test]
     fn base62_matches_jxskiss_vectors() {
