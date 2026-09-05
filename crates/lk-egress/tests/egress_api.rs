@@ -322,6 +322,12 @@ async fn start_stack(out_dir: &std::path::Path) -> (Arc<Server>, String) {
         ws_url: base.replace("http", "ws"),
         output_dir: out_dir.to_str().unwrap().to_string(),
         redis: Default::default(),
+        // Audio-only prod admission cost (0.25): multiple concurrent
+        // recordings must be admitted even on a small CI runner (the default
+        // room-composite cost of 3.0 caps a 4-core runner at one recording).
+        cpu_cost: Some(lk_egress::config::CpuCostConfig {
+            room_composite_cpu_cost: 0.25,
+        }),
         ..Default::default()
     };
     let io = IoClient::new(bus.clone()).await.unwrap();
@@ -817,6 +823,9 @@ async fn egress_reports_started_and_ended_webhooks() {
         ws_url: base.replace("http", "ws"),
         output_dir: out_dir.to_str().unwrap().to_string(),
         redis: Default::default(),
+        cpu_cost: Some(lk_egress::config::CpuCostConfig {
+            room_composite_cpu_cost: 0.25,
+        }),
         ..Default::default()
     };
     let io = IoClient::new(bus.clone()).await.unwrap();
@@ -1236,6 +1245,9 @@ async fn full_flow_over_real_redis() {
         ws_url: base.replace("http", "ws"),
         output_dir: out_dir.to_str().unwrap().to_string(),
         redis: Default::default(),
+        cpu_cost: Some(lk_egress::config::CpuCostConfig {
+            room_composite_cpu_cost: 0.25,
+        }),
         ..Default::default()
     };
     let io = IoClient::new(bus.clone()).await.unwrap();
