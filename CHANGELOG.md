@@ -13,7 +13,7 @@ The fourth component, `R`, is our own build/patch revision for changes that do n
 
 The wire `server_version` advertised in `JoinResponse` stays the protocol level (`X.Y.Z`), independent of the release revision. See [docs/versioning.md](docs/versioning.md) for the full policy.
 
-## [Unreleased]
+## [1.13.5.3] - 2026-09-05
 
 ### Changed
 
